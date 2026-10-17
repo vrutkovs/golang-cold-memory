@@ -44,7 +44,7 @@ func TestTextSitesColumns(t *testing.T) {
 		},
 	}}
 	var out bytes.Buffer
-	r.textSites(func(format string, args ...any) { fmt.Fprintf(&out, format+"\n", args...) }, 10)
+	r.textSites(func(format string, args ...any) { fmt.Fprintf(&out, format+"\n", args...) })
 	lines := strings.Split(out.String(), "\n")
 	if len(lines) < 3 || !strings.Contains(lines[1], "type") || !strings.Contains(lines[1], "allocation site") {
 		t.Fatalf("missing column headers: %q", out.String())

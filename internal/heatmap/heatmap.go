@@ -30,7 +30,7 @@ const (
 type Options struct {
 	MaxRows  int // address rows (monitored space is binned to fit)
 	MaxCols  int // time columns (consecutive snapshots are grouped)
-	MaxTypes int // allocation-site rows, largest first
+	MaxTypes int // allocation-site rows, largest first; 0 = all
 }
 
 // Level is one legend class of access rate; Max is inclusive.
@@ -262,7 +262,7 @@ func addressRows(monitored, unmonitored []proc.Range, bin uint64) []Row {
 	return rows
 }
 
-// typeRows keeps the largest maxTypes types by bytes.
+// typeRows groups each sampled allocation site; maxTypes > 0 caps rows.
 func typeRows(types map[string][]proc.Range, maxTypes int) ([]Row, int) {
 	rows := make([]Row, 0, len(types))
 	for k, rs := range types {
@@ -279,7 +279,7 @@ func typeRows(types map[string][]proc.Range, maxTypes int) ([]Row, int) {
 		}
 		return rows[i].Key < rows[j].Key
 	})
-	if len(rows) <= maxTypes {
+	if maxTypes <= 0 || len(rows) <= maxTypes {
 		return rows, 0
 	}
 	return rows[:maxTypes], len(rows) - maxTypes

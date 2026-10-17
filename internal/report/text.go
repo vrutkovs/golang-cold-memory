@@ -156,7 +156,7 @@ func (r *Report) textObjects(p func(string, ...any), top int) {
 		}
 		p("    %10s %7d  %-40s %s", human(uint64(g.Bytes)), g.Count, g.Key, labels(g.Labels))
 	}
-	r.textSites(p, top)
+	r.textSites(p)
 	if len(o.ByOwner) > 0 {
 		p("  quiet/mixed by owner (listed objects only)")
 		for i, g := range o.ByOwner {
@@ -193,7 +193,7 @@ func (r *Report) textObjects(p func(string, ...any), top int) {
 
 // textSites lists sampled allocation sites, least-used first: rows with
 // quiet bytes are candidates for allocations that are no longer used.
-func (r *Report) textSites(p func(string, ...any), top int) {
+func (r *Report) textSites(p func(string, ...any)) {
 	o := r.Objects
 	rate := "unknown"
 	if o.ProfileRate >= 0 {
@@ -216,19 +216,13 @@ func (r *Report) textSites(p func(string, ...any), top int) {
 	idle := func(g objects.Group) int64 { return g.Labels[objects.LabelQuiet]*2 + g.Labels[objects.LabelMixed] }
 	sort.SliceStable(rows, func(i, j int) bool { return idle(rows[i]) > idle(rows[j]) })
 	typeWidth, siteWidth := len("type"), len("allocation site")
-	for i, g := range rows {
-		if i == top {
-			break
-		}
+	for _, g := range rows {
 		typ, site, _ := strings.Cut(g.Key, " ← ")
 		typeWidth = max(typeWidth, len(typ))
 		siteWidth = max(siteWidth, len(site))
 	}
 	p("    %10s %5s  %-*s  %-*s  %s", "size", "count", typeWidth, "type", siteWidth, "allocation site", "bytes by label")
-	for i, g := range rows {
-		if i == top {
-			break
-		}
+	for _, g := range rows {
 		typ, site, _ := strings.Cut(g.Key, " ← ")
 		p("    %10s %5d  %-*s  %-*s  %s", human(uint64(g.Bytes)), g.Count, typeWidth, typ, siteWidth, site, labels(g.Labels))
 	}

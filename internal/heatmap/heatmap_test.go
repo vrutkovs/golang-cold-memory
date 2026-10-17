@@ -197,6 +197,7 @@ func TestHTMLWithoutTypes(t *testing.T) {
 
 func TestSiteRows(t *testing.T) {
 	x := input(t)
+	x.Option.MaxTypes = 0 // default: retain every sampled allocation site
 	x.Sites = map[string][]proc.Range{
 		"[]byte ← main.a (x/a.go:1)": {{Start: 0x10000, End: 0x11000}},
 		"[]byte ← main.b (x/b.go:2)": {{Start: 0x18000, End: 0x19000}},
@@ -205,6 +206,14 @@ func TestSiteRows(t *testing.T) {
 	h := Build(x)
 	if len(h.SiteRows) != 3 || h.SiteRows[0].Kind != KindSite {
 		t.Fatalf("site rows = %+v", h.SiteRows)
+	}
+	if h.SitesOmitted != 0 {
+		t.Fatalf("sampled sites omitted = %d", h.SitesOmitted)
+	}
+	x.Option.MaxTypes = 1
+	limited := Build(x)
+	if len(limited.SiteRows) != 1 || limited.SitesOmitted != 2 {
+		t.Fatalf("explicit site cap: rows=%d omitted=%d", len(limited.SiteRows), limited.SitesOmitted)
 	}
 	var rateA, rateB float64
 	for _, row := range h.SiteRows {

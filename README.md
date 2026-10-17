@@ -47,7 +47,7 @@ A perf hit inside the window changes its page from `quiet-candidate` to `observe
 - **Address rows** (text and JSON only): monitored space binned to `--heatmap-rows`. Each never-monitored range is one collapsed row.
 - **Columns:** DAMON snapshots, grouped to fit `--heatmap-cols`. Red borders mark time gaps.
 - **Cells:** byte-weighted DAMON access rate on a discrete legend. A dashed outline means partly monitored. Hover a cell for the numbers.
-- **Allocation-site rows** (with a core; the only HTML table): sampled objects grouped by type and allocation site, capped by `--heatmap-types`. Their placement is projected over the whole window, so earlier cells may describe other objects.
+- **Allocation-site rows** (with a core; the only HTML table): all known sampled allocation sites, grouped separately by type and first non-runtime allocation frame. `--heatmap-types=N` optionally caps the largest N groups (default `0`: no cap). Their placement is projected over the whole window, so earlier cells may describe other objects.
 - Rows sort by address, mean or max rate, or size. Names are HTML-escaped.
 - HTML rows can be filtered by type and allocation site without changing recorded data.
 
@@ -55,7 +55,7 @@ Objects the analyzer can't type from roots fall back to the type in their malloc
 
 ### Allocation sites
 
-The runtime attaches the allocation stack to every object it samples for the heap profile (about one per `MemProfileRate` bytes allocated, 512 KiB by default, so large objects are almost always sampled). `report` reads these records from the core and groups objects by type and allocation site (`type ← pkg.Func (dir/file.go:line)`, first non-runtime frame; for inlined calls the line is in the inlined callee). The text report lists sites with the most quiet bytes first, the HTML has a "By type and allocation site" table, and JSON keeps the full stack in `alloc_stack`.
+The runtime attaches one allocation stack to every object it samples for the heap profile (about one per `MemProfileRate` bytes allocated, 512 KiB by default, so large objects are almost always sampled). `report` reads these records from the core and groups objects by type and allocation site (`type ← pkg.Func (dir/file.go:line)`, first non-runtime frame; for inlined calls the line is in the inlined callee). One type can have many site rows, each with its own access rates. The text report lists every sampled site with the most quiet bytes first, the HTML has a "By type and allocation site" table, and JSON keeps the full stack for listed objects in `alloc_stack`.
 
 Unsampled objects have no site, so totals per site undercount. For more coverage, restart the target with `GODEBUG=memprofilerate=4096` (lower = more coverage and more overhead). Binaries that never link `runtime.MemProfile` (no `net/http/pprof` or `runtime/pprof` import) run with `MemProfileRate=0` and record no sites.
 
