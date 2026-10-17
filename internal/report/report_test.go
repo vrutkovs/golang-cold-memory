@@ -57,6 +57,57 @@ func TestTextSitesColumns(t *testing.T) {
 	}
 }
 
+func TestDisappearanceWindows(t *testing.T) {
+	start := []objects.Identity{
+		{Addr: 0x500, Size: 8, Type: "small"},
+		{Addr: 0x1000, Size: 32, Type: "old"},
+		{Addr: 0x2000, Size: 64, Type: "stable"},
+		{Addr: 0x3000, Size: 16, Type: "missing-page"},
+	}
+	end := map[uint64]objects.Identity{
+		0x1000: {Addr: 0x1000, Size: 32, Type: "replacement"},
+		0x2000: {Addr: 0x2000, Size: 64, Type: "stable"},
+	}
+	rows, count, bytes := disappearanceWindows(start, end, []proc.Range{{Start: 0x3000, End: 0x4000}}, 10, 20, 1)
+	if count != 2 || bytes != 40 || len(rows) != 1 || rows[0].Type != "old" || rows[0].LastSeenNS != 10 || rows[0].FirstAbsentNS != 20 {
+		t.Fatalf("disappearances = %+v count=%d bytes=%d", rows, count, bytes)
+	}
+}
+
+func TestTextDisappearanceWindows(t *testing.T) {
+	r := &Report{DisappearedCount: 1, DisappearedBytes: 32, StartCoreNS: 5 * sec,
+		Disappearances: []Disappearance{{Addr: 0x1000, Bytes: 32, Type: "[]byte", LastSeenNS: 10 * sec, FirstAbsentNS: 20 * sec}}}
+	var out bytes.Buffer
+	r.textDisappearances(func(format string, args ...any) { fmt.Fprintf(&out, format+"\n", args...) }, 10)
+	for _, want := range []string{"possible disappearances", "[]byte", "0x1000", "5s", "15s", "not proof of GC"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q: %s", want, out.String())
+		}
+	}
+}
+
+func TestHTMLDisappearanceWindows(t *testing.T) {
+	r := &Report{Heatmap: &heatmap.Heatmap{}, Settings: store.Settings{TrackDisappearances: true},
+		DisappearedCount: 1, DisappearedBytes: 32,
+		Disappearances: []Disappearance{{Addr: 0x1000, Bytes: 32, Type: "<script>", LastSeenNS: 10 * sec, FirstAbsentNS: 20 * sec}}}
+	path := filepath.Join(t.TempDir(), "heatmap.html")
+	if err := r.WriteHTML(path); err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Possible disappearances", "0x1000", "&lt;script&gt;", "not proof of GC"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("HTML missing %q", want)
+		}
+	}
+	if strings.Contains(string(out), "<bdi><script>") || strings.Contains(string(out), `title="<script>"`) {
+		t.Error("object type must be escaped")
+	}
+}
+
 // writeRecording builds a recording from the live fixture with synthetic
 // DAMON snapshots (hot buffer accessed, rest idle) and a real core.
 func writeRecording(t *testing.T) (string, *testutil.Fixture) {

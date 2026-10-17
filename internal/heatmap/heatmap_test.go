@@ -188,6 +188,11 @@ func TestHTMLWithoutTypes(t *testing.T) {
 	if strings.Contains(out, "Address space") || strings.Contains(out, "0x10000") || strings.Contains(out, "--objects") {
 		t.Error("address rows and missing-core hint must not render")
 	}
+	for _, want := range []string{`name="viewport"`, `class="report-header"`, `.table-scroll`, `:focus-visible`, `prefers-color-scheme:dark`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("responsive report lacks %q", want)
+		}
+	}
 }
 
 func TestSiteRows(t *testing.T) {
@@ -219,5 +224,11 @@ func TestSiteRows(t *testing.T) {
 	}
 	if out := b.String(); !strings.Contains(out, "<th>allocation site</th>") || !strings.Contains(out, "main.b (x/b.go:2)") || strings.Contains(out, "<script> ←") || !strings.Contains(out, "&lt;script&gt;") {
 		t.Error("site table missing")
+	}
+	out := b.String()
+	for _, want := range []string{`id="filter-type"`, `id="filter-site"`, `class="table-scroll"`, `data-type="[]byte"`, `data-site="main.b (x/b.go:2)"`, `row.hidden = `} {
+		if !strings.Contains(out, want) {
+			t.Errorf("HTML lacks filter element %q", want)
+		}
 	}
 }

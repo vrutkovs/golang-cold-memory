@@ -60,6 +60,23 @@ type Obj struct {
 	Notes    []string `json:"notes,omitempty"`
 }
 
+// Identity is a core-time object signature; matching signatures may still be reused addresses.
+type Identity struct {
+	Addr uint64
+	Size int64
+	Type string
+}
+
+// Snapshot lists reachable object signatures without computing reference paths.
+func Snapshot(p *gocore.Process) (out []Identity, err error) {
+	defer recoverErr(&err)
+	p.ForEachObject(func(x gocore.Object) bool {
+		out = append(out, Identity{Addr: uint64(p.Addr(x)), Size: p.Size(x), Type: typeName(p, x)})
+		return true
+	})
+	return out, nil
+}
+
 // Match ties a sample address to a core-time object candidate.
 type Match struct {
 	Addr   uint64 `json:"addr"`

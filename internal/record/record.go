@@ -36,25 +36,26 @@ const (
 
 // Options configure a recording.
 type Options struct {
-	PID              int
-	Duration         time.Duration
-	Out              string
-	Objects          bool
-	SnapshotInterval time.Duration
-	MapsInterval     time.Duration
-	SampleUS         uint64
-	AggrUS           uint64
-	UpdateUS         uint64
-	MinRegions       int
-	MaxRegions       int
-	MaxRanges        int
-	MaxSnapshots     int
-	PerfPeriod       int
-	PerfMaxSize      uint64
-	NoPerf           bool
-	PprofURL         string
-	DAMONRoot        string
-	DAMONFS          damon.FS // overrides DAMONRoot (tests)
+	PID                 int
+	Duration            time.Duration
+	Out                 string
+	Objects             bool
+	TrackDisappearances bool
+	SnapshotInterval    time.Duration
+	MapsInterval        time.Duration
+	SampleUS            uint64
+	AggrUS              uint64
+	UpdateUS            uint64
+	MinRegions          int
+	MaxRegions          int
+	MaxRanges           int
+	MaxSnapshots        int
+	PerfPeriod          int
+	PerfMaxSize         uint64
+	NoPerf              bool
+	PprofURL            string
+	DAMONRoot           string
+	DAMONFS             damon.FS // overrides DAMONRoot (tests)
 }
 
 func (o Options) damonFS() damon.FS {
@@ -67,19 +68,20 @@ func (o Options) damonFS() damon.FS {
 // Settings converts options to manifest settings.
 func (o Options) Settings() store.Settings {
 	return store.Settings{
-		DurationNS:         int64(o.Duration),
-		SnapshotIntervalNS: int64(o.SnapshotInterval),
-		MapsIntervalNS:     int64(o.MapsInterval),
-		SampleUS:           o.SampleUS,
-		AggrUS:             o.AggrUS,
-		UpdateUS:           o.UpdateUS,
-		MinRegions:         o.MinRegions,
-		MaxRegions:         o.MaxRegions,
-		MaxRanges:          o.MaxRanges,
-		MaxSnapshots:       o.MaxSnapshots,
-		PerfPeriod:         o.PerfPeriod,
-		Objects:            o.Objects,
-		PprofURL:           o.PprofURL,
+		DurationNS:          int64(o.Duration),
+		SnapshotIntervalNS:  int64(o.SnapshotInterval),
+		MapsIntervalNS:      int64(o.MapsInterval),
+		SampleUS:            o.SampleUS,
+		AggrUS:              o.AggrUS,
+		UpdateUS:            o.UpdateUS,
+		MinRegions:          o.MinRegions,
+		MaxRegions:          o.MaxRegions,
+		MaxRanges:           o.MaxRanges,
+		MaxSnapshots:        o.MaxSnapshots,
+		PerfPeriod:          o.PerfPeriod,
+		Objects:             o.Objects,
+		TrackDisappearances: o.TrackDisappearances,
+		PprofURL:            o.PprofURL,
 	}
 }
 
@@ -102,6 +104,8 @@ func (o Options) Validate() error {
 		return fmt.Errorf("--max-ranges must be in [1, max-regions/2]")
 	case o.MaxSnapshots < 1:
 		return fmt.Errorf("--max-snapshots must be positive")
+	case o.TrackDisappearances && !o.Objects:
+		return fmt.Errorf("--track-disappearances requires --objects")
 	}
 	if o.PprofURL != "" {
 		u, err := url.Parse(o.PprofURL)
@@ -141,6 +145,9 @@ func Estimate(o Options, maps []proc.Mapping, exeSize int64) uint64 {
 	}
 	if o.Objects {
 		est += rss + rss/10 + uint64(exeSize)
+		if o.TrackDisappearances {
+			est += rss + rss/10
+		}
 	}
 	return est
 }
@@ -268,6 +275,12 @@ func (r *run) run(ctx context.Context, cands []proc.Range) (err error) {
 	defer r.stopPerf()
 	defer r.stopMonitor()
 
+	if r.o.TrackDisappearances {
+		if err := r.captureStart(ctx, cands); err != nil {
+			r.fail(err)
+			return err
+		}
+	}
 	r.sampleMaps(cands)
 	r.startMonitor(cands)
 	r.startPerf(ctx)
@@ -294,6 +307,10 @@ func (r *run) run(ctx context.Context, cands []proc.Range) (err error) {
 	}
 	if r.o.Objects {
 		r.captureCore(ctx, cands)
+		if r.o.TrackDisappearances && !r.m.Capabilities[store.CapCore].Available {
+			r.m.Status = store.StatusIncomplete
+			return fmt.Errorf("end core capture failed: %s", r.m.Capabilities[store.CapCore].Reason)
+		}
 	} else {
 		r.capability(store.CapCore, false, "not requested (--objects)")
 	}
@@ -479,10 +496,23 @@ func (r *run) captureCore(ctx context.Context, cands []proc.Range) {
 		return
 	}
 
-	sum, err := coredump.CopyExe(r.o.Out, r.o.PID)
-	if err != nil {
-		r.capability(store.CapCore, false, "copy exe: "+err.Error())
-		return
+	sum := ""
+	if r.m.StartCore != nil {
+		sum = r.m.StartCore.ExeSHA256
+	}
+	if sum == "" {
+		var err error
+		sum, err = coredump.CopyExe(r.o.Out, r.o.PID)
+		if err != nil {
+			r.capability(store.CapCore, false, "copy exe: "+err.Error())
+			return
+		}
+	} else {
+		current, err := proc.HashFile(proc.ExePath(r.o.PID))
+		if err != nil || current != sum {
+			r.capability(store.CapCore, false, "target executable changed before end core")
+			return
+		}
 	}
 	c.ExeSHA256 = sum
 	if sum != r.m.Binary.SHA256 {
@@ -514,6 +544,39 @@ func (r *run) captureCore(ctx context.Context, cands []proc.Range) {
 	r.capability(store.CapCore, true, "")
 	fmt.Fprintf(r.log, "core: %s (%.1fs pause, %.2fs after final snapshot)\n", path,
 		time.Duration(c.EndNS-c.StartNS).Seconds(), time.Duration(c.SnapshotGapNS).Seconds())
+}
+
+// captureStart pauses the target before access monitoring begins.
+func (r *run) captureStart(ctx context.Context, cands []proc.Range) error {
+	if err := r.id.Check(); err != nil {
+		return err
+	}
+	sum, err := coredump.CopyExe(r.o.Out, r.o.PID)
+	if err != nil {
+		return fmt.Errorf("copy exe: %w", err)
+	}
+	if sum != r.m.Binary.SHA256 {
+		return fmt.Errorf("executable changed before start core")
+	}
+	r.m.StartCore = &store.Core{}
+	c := r.m.StartCore
+	c.ExeSHA256 = sum
+	c.StartNS = host.Mono()
+	path, log, err := coredump.CaptureStart(ctx, r.o.Out, r.o.PID)
+	c.EndNS = host.Mono()
+	c.Log = tail(string(log), 4096)
+	if err != nil {
+		return err
+	}
+	if err := r.id.Check(); err != nil {
+		return fmt.Errorf("PID changed during start core capture: %w", err)
+	}
+	c.Path = filepath.Base(path)
+	c.Missing, err = coredump.Missing(path, cands)
+	if err != nil {
+		return err
+	}
+	return r.save()
 }
 
 // fetchPprof saves an existing heap profile endpoint without forcing GC.

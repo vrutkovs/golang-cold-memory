@@ -48,19 +48,20 @@ type Capability struct {
 
 // Settings are the sampling settings of a run.
 type Settings struct {
-	DurationNS         int64  `json:"duration_ns"`
-	SnapshotIntervalNS int64  `json:"snapshot_interval_ns"`
-	MapsIntervalNS     int64  `json:"maps_interval_ns"`
-	SampleUS           uint64 `json:"sample_us"`
-	AggrUS             uint64 `json:"aggr_us"`
-	UpdateUS           uint64 `json:"update_us"`
-	MinRegions         int    `json:"min_regions"`
-	MaxRegions         int    `json:"max_regions"`
-	MaxRanges          int    `json:"max_ranges"`
-	MaxSnapshots       int    `json:"max_snapshots"`
-	PerfPeriod         int    `json:"perf_period"`
-	Objects            bool   `json:"objects"`
-	PprofURL           string `json:"pprof_url,omitempty"`
+	DurationNS          int64  `json:"duration_ns"`
+	SnapshotIntervalNS  int64  `json:"snapshot_interval_ns"`
+	MapsIntervalNS      int64  `json:"maps_interval_ns"`
+	SampleUS            uint64 `json:"sample_us"`
+	AggrUS              uint64 `json:"aggr_us"`
+	UpdateUS            uint64 `json:"update_us"`
+	MinRegions          int    `json:"min_regions"`
+	MaxRegions          int    `json:"max_regions"`
+	MaxRanges           int    `json:"max_ranges"`
+	MaxSnapshots        int    `json:"max_snapshots"`
+	PerfPeriod          int    `json:"perf_period"`
+	Objects             bool   `json:"objects"`
+	TrackDisappearances bool   `json:"track_disappearances,omitempty"`
+	PprofURL            string `json:"pprof_url,omitempty"`
 }
 
 // Perf records perf collection metadata.
@@ -101,6 +102,7 @@ type Manifest struct {
 	Capabilities map[string]Capability `json:"capabilities"`
 	Perf         Perf                  `json:"perf"`
 	Core         Core                  `json:"core"`
+	StartCore    *Core                 `json:"start_core,omitempty"`
 	StartNS      int64                 `json:"start_ns"`
 	EndNS        int64                 `json:"end_ns"`
 }

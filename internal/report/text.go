@@ -71,6 +71,7 @@ func (r *Report) Text(w io.Writer, top int) {
 	r.textRegions(p, top)
 	r.textMap.Text(w)
 	r.textObjects(p, top)
+	r.textDisappearances(p, top)
 
 	if len(r.Pprof) > 0 || r.PprofErr != "" {
 		p("heap pprof (sampled allocation sites; separate context, not joined to addresses)")
@@ -84,6 +85,26 @@ func (r *Report) Text(w io.Writer, top int) {
 
 	for _, n := range r.Notes {
 		p("note      %s", n)
+	}
+}
+
+// textDisappearances shows only changes in reachability across two core dumps.
+func (r *Report) textDisappearances(p func(string, ...any), top int) {
+	if r.DisappearancesErr != "" {
+		p("possible disappearances unavailable: %s", r.DisappearancesErr)
+		return
+	}
+	if !r.Settings.TrackDisappearances && r.DisappearedCount == 0 {
+		return
+	}
+	p("possible disappearances: %d objects (%s); reachable at start core, absent at end core; times since start core, not proof of GC (address reuse can hide changes)",
+		r.DisappearedCount, human(uint64(r.DisappearedBytes)))
+	for i, x := range r.Disappearances {
+		if i == top {
+			break
+		}
+		p("  %#x %10s %-40s last seen %s, first absent %s", x.Addr, human(uint64(x.Bytes)), x.Type,
+			dur(x.LastSeenNS-r.StartCoreNS), dur(x.FirstAbsentNS-r.StartCoreNS))
 	}
 }
 
