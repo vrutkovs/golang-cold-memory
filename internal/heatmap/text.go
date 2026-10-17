@@ -40,14 +40,14 @@ func (h *Heatmap) Text(w io.Writer) {
 	fmt.Fprintf(w, "  levels: %s\n", strings.Join(legend, ", "))
 
 	row := func(r Row, name string) {
-		fmt.Fprintf(w, "  %-40.40s %9s %-15s |%s| perf %d\n", name, human(r.Bytes), r.Label, glyphs(r), r.PerfTotal)
+		fmt.Fprintf(w, "  %-40.40s %9s %-15s |%s|\n", name, human(r.Bytes), r.Label, glyphs(r))
 	}
 
-	// Small rows without access or perf hits are elided to keep the grid short.
+	// Small rows without observed access are elided to keep the grid short.
 	var elided int
 	var elidedBytes uint64
 	for _, r := range h.Rows {
-		if r.Bytes < h.BinBytes/4 && r.MaxRate == 0 && r.PerfTotal == 0 {
+		if r.Bytes < h.BinBytes/4 && r.MaxRate == 0 {
 			elided++
 			elidedBytes += r.Bytes
 			continue
@@ -55,13 +55,7 @@ func (h *Heatmap) Text(w io.Writer) {
 		row(r, fmt.Sprintf("%#x-%#x", r.Start, r.End))
 	}
 	if elided > 0 {
-		fmt.Fprintf(w, "  (%d small rows without observed access or perf hits elided, %s; see --json/--html)\n", elided, human(elidedBytes))
-	}
-	if len(h.TypeRows) > 0 {
-		fmt.Fprintln(w, "  by core-time type (placement projected over window):")
-		for _, r := range h.TypeRows {
-			row(r, r.Key)
-		}
+		fmt.Fprintf(w, "  (%d small rows without observed access elided, %s; see --json)\n", elided, human(elidedBytes))
 	}
 }
 

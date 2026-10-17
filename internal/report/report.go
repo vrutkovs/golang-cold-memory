@@ -72,7 +72,6 @@ type Report struct {
 	Heatmap        *heatmap.Heatmap      `json:"heatmap"`
 
 	textMap *heatmap.Heatmap
-	types   map[string][]proc.Range // core-time object ranges by type
 	sites   map[string][]proc.Range // sampled object ranges by type ← site
 }
 
@@ -135,7 +134,7 @@ func Build(dir string, o Options) (*Report, error) {
 		r.pprof(filepath.Join(dir, store.PprofFile), o.Top)
 	}
 
-	hm := heatmap.Input{In: in, Res: res, Snaps: r.DAMONSnapshots, Types: r.types, Sites: r.sites, Option: o.Heatmap}
+	hm := heatmap.Input{In: in, Res: res, Snaps: r.DAMONSnapshots, Sites: r.sites, Option: o.Heatmap}
 	r.Heatmap = heatmap.Build(hm)
 	hm.Option = textHeatmap
 	r.textMap = heatmap.Build(hm)
@@ -168,9 +167,8 @@ func (r *Report) objects(dir string, m *store.Manifest, o Options) {
 	for i, s := range r.MatchSamples {
 		addrs[i] = s.Addr
 	}
-	r.types, r.sites = map[string][]proc.Range{}, map[string][]proc.Range{}
+	r.sites = map[string][]proc.Range{}
 	each := func(name, site string, start, end uint64) {
-		addRange(r.types, name, start, end)
 		if site != objects.NoSite {
 			addRange(r.sites, objects.SiteKey(name, site), start, end)
 		}

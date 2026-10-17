@@ -194,12 +194,22 @@ func (r *Report) textSites(p func(string, ...any), top int) {
 	}
 	idle := func(g objects.Group) int64 { return g.Labels[objects.LabelQuiet]*2 + g.Labels[objects.LabelMixed] }
 	sort.SliceStable(rows, func(i, j int) bool { return idle(rows[i]) > idle(rows[j]) })
+	typeWidth, siteWidth := len("type"), len("allocation site")
 	for i, g := range rows {
 		if i == top {
 			break
 		}
-		p("    %10s %5d  %s", human(uint64(g.Bytes)), g.Count, labels(g.Labels))
-		p("               %s", g.Key)
+		typ, site, _ := strings.Cut(g.Key, " ← ")
+		typeWidth = max(typeWidth, len(typ))
+		siteWidth = max(siteWidth, len(site))
+	}
+	p("    %10s %5s  %-*s  %-*s  %s", "size", "count", typeWidth, "type", siteWidth, "allocation site", "bytes by label")
+	for i, g := range rows {
+		if i == top {
+			break
+		}
+		typ, site, _ := strings.Cut(g.Key, " ← ")
+		p("    %10s %5d  %-*s  %-*s  %s", human(uint64(g.Bytes)), g.Count, typeWidth, typ, siteWidth, site, labels(g.Labels))
 	}
 }
 

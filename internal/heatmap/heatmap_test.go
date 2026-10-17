@@ -2,6 +2,7 @@ package heatmap
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -19,6 +20,15 @@ const (
 )
 
 func dr(s, e, acc uint64) damon.Region { return damon.Region{Start: s, End: e, NrAccesses: acc} }
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
 
 // fixture: monitored 0x10000-0x20000 over 4 snapshots (aggr 1s, 50 checks);
 // 0x20000-0x24000 is mapped but never monitored.
@@ -88,8 +98,8 @@ func TestAddressGrid(t *testing.T) {
 		t.Errorf("unmonitored row = %+v", u)
 	}
 
-	if r3.Perf[2] != 1 || r3.PerfTotal != 1 || !h.PerfPlaced {
-		t.Errorf("perf placement = %v", r3.Perf)
+	if strings.Contains(mustJSON(t, h), `"perf"`) {
+		t.Error("heatmap must not expose perf samples")
 	}
 }
 
@@ -107,20 +117,11 @@ func TestColumnGroupingAndGaps(t *testing.T) {
 	}
 }
 
-func TestTypeRowsAndEscaping(t *testing.T) {
+func TestNoCoreTimeTypeRows(t *testing.T) {
 	x := input(t)
-	x.Types = map[string][]proc.Range{
-		"<script>alert(1)</script>": {{Start: 0x10000, End: 0x11000}},
-		"main.idle":                 {{Start: 0x18000, End: 0x1a000}, {Start: 0x1a000, End: 0x1c000}},
-		"tiny":                      {{Start: 0x1f000, End: 0x1f010}},
-	}
-	x.Option.MaxTypes = 2
 	h := Build(x)
-	if len(h.TypeRows) != 2 || h.TypesOmitted != 1 || h.TypeRows[0].Key != "main.idle" {
-		t.Fatalf("type rows = %+v omitted=%d", h.TypeRows, h.TypesOmitted)
-	}
-	if h.TypeRows[0].Bytes != 0x4000 || h.TypeRows[0].MaxRate != 0 {
-		t.Errorf("main.idle = %+v", h.TypeRows[0])
+	if strings.Contains(mustJSON(t, h), `"type_rows"`) {
+		t.Error("heatmap must not expose core-time type rows")
 	}
 
 	var b bytes.Buffer
@@ -131,10 +132,10 @@ func TestTypeRowsAndEscaping(t *testing.T) {
 	if strings.Contains(out, "address bin") {
 		t.Error("stale address-bin header")
 	}
-	if strings.Contains(out, "<script>alert") || !strings.Contains(out, "&lt;script&gt;") {
-		t.Error("type name not escaped")
+	if strings.Contains(out, "Core-time object types") || strings.Contains(out, "perf sample") || strings.Contains(out, "perf hits") {
+		t.Error("obsolete type table or perf samples rendered")
 	}
-	for _, want := range []string{"not monitored (hatched)", "no access observed", "&gt; 30%", "perf sample(s) in cell", `class="c l7`, "main.idle"} {
+	for _, want := range []string{"not monitored (hatched)", "no access observed", "&gt; 30%"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("HTML lacks %q", want)
 		}
@@ -152,6 +153,9 @@ func TestTextGlyphs(t *testing.T) {
 			t.Errorf("text lacks %q:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "perf") || strings.Contains(out, "core-time type") {
+		t.Error("obsolete heatmap details in text")
+	}
 }
 
 func TestPerfOnly(t *testing.T) {
@@ -163,28 +167,15 @@ func TestPerfOnly(t *testing.T) {
 	if len(h.Columns) != 4 {
 		t.Fatalf("columns = %d", len(h.Columns))
 	}
-	total := 0
 	for _, r := range h.Rows {
-		total += r.PerfTotal
 		for _, v := range r.Rate {
 			if v != nil {
 				t.Fatal("perf-only cells must be unmonitored")
 			}
 		}
 	}
-	if total != 1 {
-		t.Errorf("perf hits = %d", total)
-	}
-}
-
-// Slivers left by snapshot reads are not gaps: the sample joins the next column.
-func TestPerfSliver(t *testing.T) {
-	x := input(t)
-	x.Snaps[1].T = 2*sec + 100_000_000
-	x.In.Samples = []perfmem.Sample{{TimeNS: sec + 50_000_000, Addr: 0x10010}}
-	h := Build(x)
-	if h.PerfInGaps != 0 || h.Rows[0].Perf[1] != 1 {
-		t.Errorf("gaps=%d perf=%v", h.PerfInGaps, h.Rows[0].Perf)
+	if strings.Contains(mustJSON(t, h), `"perf"`) {
+		t.Error("heatmap must not expose perf samples")
 	}
 }
 
@@ -194,8 +185,8 @@ func TestHTMLWithoutTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	if strings.Contains(out, "Address space") || strings.Contains(out, "0x10000") || !strings.Contains(out, "--objects") {
-		t.Error("address rows must not render; missing-core hint expected")
+	if strings.Contains(out, "Address space") || strings.Contains(out, "0x10000") || strings.Contains(out, "--objects") {
+		t.Error("address rows and missing-core hint must not render")
 	}
 }
 
@@ -204,19 +195,29 @@ func TestSiteRows(t *testing.T) {
 	x.Sites = map[string][]proc.Range{
 		"[]byte ← main.a (x/a.go:1)": {{Start: 0x10000, End: 0x11000}},
 		"[]byte ← main.b (x/b.go:2)": {{Start: 0x18000, End: 0x19000}},
+		"<script> ← main.c":          {{Start: 0x11000, End: 0x12000}},
 	}
 	h := Build(x)
-	if len(h.SiteRows) != 2 || h.SiteRows[0].Kind != KindSite {
+	if len(h.SiteRows) != 3 || h.SiteRows[0].Kind != KindSite {
 		t.Fatalf("site rows = %+v", h.SiteRows)
 	}
-	if h.SiteRows[0].MaxRate == h.SiteRows[1].MaxRate {
+	var rateA, rateB float64
+	for _, row := range h.SiteRows {
+		if strings.Contains(row.Key, "main.a") {
+			rateA = row.MaxRate
+		}
+		if strings.Contains(row.Key, "main.b") {
+			rateB = row.MaxRate
+		}
+	}
+	if rateA == rateB {
 		t.Error("sites of one type must keep separate rates")
 	}
 	var b bytes.Buffer
 	if err := h.HTML(&b, Meta{}); err != nil {
 		t.Fatal(err)
 	}
-	if out := b.String(); !strings.Contains(out, "<th>allocation site</th>") || !strings.Contains(out, "main.b (x/b.go:2)") {
+	if out := b.String(); !strings.Contains(out, "<th>allocation site</th>") || !strings.Contains(out, "main.b (x/b.go:2)") || strings.Contains(out, "<script> ←") || !strings.Contains(out, "&lt;script&gt;") {
 		t.Error("site table missing")
 	}
 }

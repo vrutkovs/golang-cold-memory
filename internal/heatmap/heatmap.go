@@ -1,9 +1,8 @@
-// Package heatmap builds address × time and type × time access heatmaps.
+// Package heatmap builds address × time and allocation-site × time access heatmaps.
 //
 // Cells hold DAMON access rates (fraction of sampling checks that saw
 // access per aggregation interval), byte-weighted over the covered part
 // of the cell. Unmonitored cells stay empty instead of reading as zero.
-// Perf sample counts are kept separately: absence of hits proves nothing.
 package heatmap
 
 import (
@@ -11,7 +10,6 @@ import (
 
 	"github.com/vrutkovs/golang-cold-memory/internal/analysis"
 	"github.com/vrutkovs/golang-cold-memory/internal/objects"
-	"github.com/vrutkovs/golang-cold-memory/internal/perfmem"
 	"github.com/vrutkovs/golang-cold-memory/internal/proc"
 	"github.com/vrutkovs/golang-cold-memory/internal/store"
 )
@@ -20,7 +18,6 @@ import (
 const (
 	KindAddress     = "address"
 	KindUnmonitored = "unmonitored"
-	KindType        = "type"
 	KindSite        = "site"
 )
 
@@ -33,7 +30,7 @@ const (
 type Options struct {
 	MaxRows  int // address rows (monitored space is binned to fit)
 	MaxCols  int // time columns (consecutive snapshots are grouped)
-	MaxTypes int // core-time type rows, largest first
+	MaxTypes int // allocation-site rows, largest first
 }
 
 // Level is one legend class of access rate; Max is inclusive.
@@ -86,12 +83,10 @@ type Row struct {
 	Label        string       `json:"label"`
 	Rate         []*float64   `json:"rate"` // nil = not monitored
 	Coverage     []float64    `json:"coverage"`
-	Perf         []int        `json:"perf"`
 	MeanRate     float64      `json:"mean_rate"`
 	MaxRate      float64      `json:"max_rate"`
-	PerfTotal    int          `json:"perf_total"`
 	CoveredShare float64      `json:"covered_share"`
-	ranges       []proc.Range // type rows: merged object ranges
+	ranges       []proc.Range // site rows: merged object ranges
 }
 
 // Heatmap is the full grid.
@@ -100,12 +95,8 @@ type Heatmap struct {
 	Columns      []Column        `json:"columns"`
 	BinBytes     uint64          `json:"bin_bytes"`
 	Rows         []Row           `json:"rows"`
-	TypeRows     []Row           `json:"type_rows,omitempty"`
-	TypesOmitted int             `json:"types_omitted,omitempty"`
 	SiteRows     []Row           `json:"site_rows,omitempty"`
 	SitesOmitted int             `json:"sites_omitted,omitempty"`
-	PerfPlaced   bool            `json:"perf_placed_in_time"`
-	PerfInGaps   int             `json:"perf_samples_in_gaps,omitempty"`
 	Levels       []Level         `json:"levels"`
 	Notes        []string        `json:"notes,omitempty"`
 }
@@ -114,8 +105,7 @@ type Heatmap struct {
 type Input struct {
 	In     analysis.Input
 	Res    *analysis.Result
-	Snaps  []store.DAMONSnapshot // window snapshots, time order
-	Types  map[string][]proc.Range
+	Snaps  []store.DAMONSnapshot   // window snapshots, time order
 	Sites  map[string][]proc.Range // sampled objects by "type ← site"
 	Option Options
 }
@@ -146,13 +136,6 @@ func Build(x Input) *Heatmap {
 		h.fill(r, []proc.Range{{Start: r.Start, End: r.End}}, x.Snaps, colOf, maxChecks)
 	}
 
-	h.TypeRows, h.TypesOmitted = typeRows(x.Types, o.MaxTypes)
-	for i := range h.TypeRows {
-		r := &h.TypeRows[i]
-		r.Label = typeLabel(res, r.ranges)
-		h.fill(r, r.ranges, x.Snaps, colOf, maxChecks)
-	}
-
 	h.SiteRows, h.SitesOmitted = typeRows(x.Sites, o.MaxTypes)
 	for i := range h.SiteRows {
 		r := &h.SiteRows[i]
@@ -161,12 +144,8 @@ func Build(x Input) *Heatmap {
 		h.fill(r, r.ranges, x.Snaps, colOf, maxChecks)
 	}
 
-	h.overlayPerf(x.In.Samples, m.Perf.Clock == perfmem.ClockMono)
 	if len(x.Snaps) == 0 {
-		h.Notes = append(h.Notes, "no DAMON snapshots: cells unmonitored, perf hits only")
-	}
-	if len(h.TypeRows) > 0 {
-		h.Notes = append(h.Notes, "type rows project core-time object placement over the whole window; addresses may have held other objects earlier")
+		h.Notes = append(h.Notes, "no DAMON snapshots: cells unmonitored")
 	}
 	return h
 }
@@ -207,7 +186,7 @@ func (h *Heatmap) columns(snaps []store.DAMONSnapshot, w analysis.Window, maxCol
 // fill computes per-column byte-weighted rates over rs.
 func (h *Heatmap) fill(r *Row, rs []proc.Range, snaps []store.DAMONSnapshot, colOf []int, maxChecks float64) {
 	n := len(h.Columns)
-	r.Rate, r.Coverage, r.Perf = make([]*float64, n), make([]float64, n), make([]int, n)
+	r.Rate, r.Coverage = make([]*float64, n), make([]float64, n)
 	cov, sum := make([]float64, n), make([]float64, n)
 	snapsIn := make([]int, n)
 	for i, s := range snaps {
@@ -240,44 +219,6 @@ func (h *Heatmap) fill(r *Row, rs []proc.Range, snaps []store.DAMONSnapshot, col
 	if totCov > 0 {
 		r.MeanRate = totSum / totCov
 		r.CoveredShare = totCov / (float64(r.Bytes) * float64(len(snaps)))
-	}
-}
-
-// overlayPerf counts samples per cell. Without a shared clock, samples
-// cannot be placed in time and are left out of the grid.
-func (h *Heatmap) overlayPerf(samples []perfmem.Sample, comparable bool) {
-	h.PerfPlaced = comparable
-	if len(samples) == 0 || len(h.Columns) == 0 {
-		return
-	}
-	if !comparable {
-		h.Notes = append(h.Notes, "perf clock differs from DAMON clock: perf hits not placed in the grid")
-		return
-	}
-
-	for _, s := range samples {
-		if s.Addr == 0 || s.TimeNS < h.Window.StartNS || s.TimeNS > h.Window.EndNS {
-			continue
-		}
-		// Snapshot reads leave sub-interval slivers between columns; samples
-		// there belong to the next column, like analysis gap detection.
-		c := sort.Search(len(h.Columns), func(k int) bool { return h.Columns[k].EndNS >= s.TimeNS })
-		if c == len(h.Columns) || s.TimeNS < h.Columns[c].StartNS-h.Window.AggrNS/2 {
-			h.PerfInGaps++
-			continue
-		}
-		if i := findRow(h.Rows, s.Addr); i >= 0 {
-			h.Rows[i].Perf[c]++
-			h.Rows[i].PerfTotal++
-		}
-		for _, rows := range [][]Row{h.TypeRows, h.SiteRows} {
-			for i := range rows {
-				if inRanges(rows[i].ranges, s.Addr) {
-					rows[i].Perf[c]++
-					rows[i].PerfTotal++
-				}
-			}
-		}
 	}
 }
 
@@ -329,7 +270,7 @@ func typeRows(types map[string][]proc.Range, maxTypes int) ([]Row, int) {
 		if len(rs) == 0 {
 			continue
 		}
-		rows = append(rows, Row{Kind: KindType, Key: k, Start: rs[0].Start, End: rs[len(rs)-1].End,
+		rows = append(rows, Row{Kind: KindSite, Key: k, Start: rs[0].Start, End: rs[len(rs)-1].End,
 			Bytes: proc.TotalSize(rs), ranges: rs})
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -361,17 +302,4 @@ func typeLabel(res *analysis.Result, rs []proc.Range) string {
 		return objects.LabelObserved
 	}
 	return objects.LabelUnknown
-}
-
-func findRow(rows []Row, a uint64) int {
-	i := sort.Search(len(rows), func(k int) bool { return rows[k].End > a })
-	if i < len(rows) && rows[i].Start <= a {
-		return i
-	}
-	return -1
-}
-
-func inRanges(rs []proc.Range, a uint64) bool {
-	i := sort.Search(len(rs), func(k int) bool { return rs[k].End > a })
-	return i < len(rs) && rs[i].Start <= a
 }

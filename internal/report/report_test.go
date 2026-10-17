@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,28 @@ func reportOpts() Options {
 		MaxPaths:   50,
 		TopObjects: 20,
 		Heatmap:    heatmap.Options{MaxRows: 64, MaxCols: 30, MaxTypes: 10},
+	}
+}
+
+func TestTextSitesColumns(t *testing.T) {
+	r := &Report{Objects: &objects.Result{
+		Objects: 2, Sampled: 2, Bytes: 8192, SampledBytes: 8192,
+		BySite: []objects.Group{
+			{Key: objects.SiteKey("[]byte", "main.alloc (x/a.go:1)"), Bytes: 4096, Count: 1},
+			{Key: objects.SiteKey(strings.Repeat("X", 50), "main.long"), Bytes: 4096, Count: 1},
+		},
+	}}
+	var out bytes.Buffer
+	r.textSites(func(format string, args ...any) { fmt.Fprintf(&out, format+"\n", args...) }, 10)
+	lines := strings.Split(out.String(), "\n")
+	if len(lines) < 3 || !strings.Contains(lines[1], "type") || !strings.Contains(lines[1], "allocation site") {
+		t.Fatalf("missing column headers: %q", out.String())
+	}
+	if !strings.Contains(lines[2], "[]byte") || !strings.Contains(lines[2], "main.alloc (x/a.go:1)") || strings.Contains(lines[2], " ← ") {
+		t.Fatalf("type and site not separate columns: %q", out.String())
+	}
+	if strings.Index(lines[2], "main.alloc") != strings.Index(lines[3], "main.long") {
+		t.Fatalf("allocation-site columns not aligned: %q", out.String())
 	}
 }
 
@@ -155,21 +178,16 @@ func TestReportEndToEnd(t *testing.T) {
 		t.Errorf("match = %+v", sm)
 	}
 
-	// Heatmap agrees with region analysis: hot buffer accessed, idle type never.
+	// Heatmap agrees with region analysis: hot buffer accessed.
 	hm := r.Heatmap
-	var hotMax, idleMax float64 = 0, -1
+	var hotMax float64
 	for _, row := range hm.Rows {
 		if row.Start <= f.Hot.Addr && f.Hot.Addr < row.End {
 			hotMax = row.MaxRate
 		}
 	}
-	for _, row := range hm.TypeRows {
-		if row.Key == "[8388608]uint8" {
-			idleMax = row.MaxRate
-		}
-	}
-	if hotMax == 0 || idleMax != 0 {
-		t.Errorf("heatmap hot max=%v idle type max=%v", hotMax, idleMax)
+	if hotMax == 0 {
+		t.Errorf("heatmap hot max=%v", hotMax)
 	}
 	htmlPath := filepath.Join(t.TempDir(), "hm.html")
 	if err := r.WriteHTML(htmlPath); err != nil {
@@ -188,7 +206,7 @@ func TestReportEndToEnd(t *testing.T) {
 	if !strings.Contains(text.String(), "heatmap (") {
 		t.Error("text lacks heatmap")
 	}
-	if err := r.JSON(&js); err != nil || !strings.Contains(js.String(), `"damon_snapshots"`) || !strings.Contains(js.String(), `"type_rows"`) {
+	if err := r.JSON(&js); err != nil || !strings.Contains(js.String(), `"damon_snapshots"`) || strings.Contains(js.String(), `"type_rows"`) {
 		t.Errorf("json err=%v", err)
 	}
 }

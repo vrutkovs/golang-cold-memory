@@ -26,7 +26,7 @@ gocold report DIR [--json] [--from 10s --to 50s]
 | Source | Needs | If missing |
 |---|---|---|
 | DAMON sysfs (`fvaddr`, explicit ranges, `stat` scheme only) | root/`CAP_SYS_ADMIN` on the host, and no existing kdamonds | Regions become `unknown`. |
-| `perf mem` (PEBS / IBS / SPE, events picked by the probe) | a memory-sampling PMU and perf permission | No sample overlay. |
+| `perf mem` (PEBS / IBS / SPE, events picked by the probe) | a memory-sampling PMU and perf permission | No sampled-access evidence for region analysis. |
 | `/proc/PID/pagemap` present bits (+ `/proc/kpageflags` to exclude zero-page mappings) | ptrace-read access; root for kpageflags | No resident totals and no quiet candidates. Without kpageflags, only exclusively mapped pages count as resident. |
 | core (`gcore`) + exact `/proc/PID/exe` | `--objects`, ptrace, and DWARF in the binary | No object mapping. |
 
@@ -45,9 +45,9 @@ A perf hit inside the window changes its page from `quiet-candidate` to `observe
 
 - **Address rows** (text and JSON only): monitored space binned to `--heatmap-rows`. Each never-monitored range is one collapsed row.
 - **Columns:** DAMON snapshots, grouped to fit `--heatmap-cols`. Red borders mark time gaps.
-- **Cells:** byte-weighted DAMON access rate on a discrete legend. A dashed outline means partly monitored; a blue dot means perf samples. Hover a cell for the numbers.
-- **Type rows** (with a core; the only HTML table): the largest `--heatmap-types` core-time types. Their placement is projected over the whole window, so earlier cells may describe other objects.
-- Rows sort by address, mean or max rate, perf hits, or size. Names are HTML-escaped.
+- **Cells:** byte-weighted DAMON access rate on a discrete legend. A dashed outline means partly monitored. Hover a cell for the numbers.
+- **Allocation-site rows** (with a core; the only HTML table): sampled objects grouped by type and allocation site, capped by `--heatmap-types`. Their placement is projected over the whole window, so earlier cells may describe other objects.
+- Rows sort by address, mean or max rate, or size. Names are HTML-escaped.
 
 Objects the analyzer can't type from roots fall back to the type in their malloc header (Go 1.22+, pointerful objects > 512 B, and large objects), shown as `alloc:T` or `alloc:[n]T`. This is the allocated type, not necessarily current use. Small objects and pointer-free objects have no header and stay `unk<size>`.
 

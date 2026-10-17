@@ -32,6 +32,25 @@ func opts(pid int, out string, fs *damontest.FS) record.Options {
 	}
 }
 
+func TestTrackDisappearancesRequiresObjects(t *testing.T) {
+	o := opts(1, "unused", damontest.New("0"))
+	o.TrackDisappearances = true
+	if err := o.Validate(); err == nil || !strings.Contains(err.Error(), "--objects") {
+		t.Fatalf("expected --objects requirement, got %v", err)
+	}
+}
+
+func TestTrackDisappearancesDiskEstimate(t *testing.T) {
+	o := opts(1, "unused", damontest.New("0"))
+	o.Objects = true
+	maps := []proc.Mapping{{Rss: 1 << 20}}
+	base := record.Estimate(o, maps, 1024)
+	o.TrackDisappearances = true
+	if extra := record.Estimate(o, maps, 1024) - base; extra < 1<<20 {
+		t.Fatalf("second core reserved %d bytes, want at least 1 MiB", extra)
+	}
+}
+
 // fakeKernel answers snapshots like DAMON: blocks one aggregation, hot buffer accessed.
 func fakeKernel(t *testing.T, f *testutil.Fixture) *damontest.FS {
 	maps, err := proc.ReadMaps(f.Cmd.Process.Pid)
