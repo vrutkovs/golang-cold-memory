@@ -224,6 +224,7 @@ type run struct {
 	mon            *damon.Monitor
 	perf           *perfmem.Recorder
 	perfPath       string
+	perfStopped    bool
 	lastSnap       int64
 }
 
@@ -254,8 +255,7 @@ func (r *run) run(ctx context.Context, cands []proc.Range) (err error) {
 	defer r.dmn.Close()
 
 	// Cleanup runs on every exit path, including interruption.
-	defer r.stopMonitor()
-	defer r.stopPerf(context.WithoutCancel(ctx))
+	// Defers run in reverse: monitor -> perf stop -> perf convert -> manifest.
 	defer func() {
 		if r.m.Status == store.StatusRunning {
 			r.m.Status = store.StatusIncomplete
@@ -264,6 +264,9 @@ func (r *run) run(ctx context.Context, cands []proc.Range) (err error) {
 			err = serr
 		}
 	}()
+	defer r.convertPerf(context.WithoutCancel(ctx))
+	defer r.stopPerf()
+	defer r.stopMonitor()
 
 	r.sampleMaps(cands)
 	r.startMonitor(cands)
@@ -278,9 +281,10 @@ func (r *run) run(ctx context.Context, cands []proc.Range) (err error) {
 	r.m.EndNS = host.Mono()
 	r.sampleMaps(cands)
 
-	// Order: final DAMON snapshot (taken in loop) -> stop monitor -> stop perf -> core.
+	// Order: final DAMON snapshot (taken in loop) -> stop monitor -> stop perf
+	// -> core -> slow perf conversion, keeping the core close to the snapshot.
 	r.stopMonitor()
-	r.stopPerf(context.WithoutCancel(ctx))
+	r.stopPerf()
 	r.m.Status = status
 	_ = r.save()
 
@@ -293,6 +297,7 @@ func (r *run) run(ctx context.Context, cands []proc.Range) (err error) {
 	} else {
 		r.capability(store.CapCore, false, "not requested (--objects)")
 	}
+	r.convertPerf(context.WithoutCancel(ctx))
 	if r.o.PprofURL != "" {
 		r.fetchPprof(ctx)
 	} else {
@@ -435,17 +440,27 @@ func (r *run) startPerf(ctx context.Context) {
 	r.capability(store.CapPerf, true, "")
 }
 
-func (r *run) stopPerf(ctx context.Context) {
+// stopPerf flushes perf.data; conversion happens later in convertPerf.
+func (r *run) stopPerf() {
 	if r.perf == nil {
 		return
 	}
 	log, err := r.perf.Stop()
 	r.perf = nil
+	r.perfStopped = true
 	r.m.Perf.StopNS = host.Mono()
 	r.m.Perf.Log = tail(log, 4096)
 	if err != nil {
 		r.fail(err)
 	}
+}
+
+// convertPerf extracts samples once from a stopped recording.
+func (r *run) convertPerf(ctx context.Context) {
+	if !r.perfStopped {
+		return
+	}
+	r.perfStopped = false
 
 	_ = os.Chmod(filepath.Join(r.o.Out, store.PerfData), 0o600)
 	sum := perfmem.Convert(ctx, r.perfPath, filepath.Join(r.o.Out, store.PerfData), filepath.Join(r.o.Out, store.PerfSamples))

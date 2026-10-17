@@ -27,7 +27,7 @@ gocold report DIR [--json] [--from 10s --to 50s]
 |---|---|---|
 | DAMON sysfs (`fvaddr`, explicit ranges, `stat` scheme only) | root/`CAP_SYS_ADMIN` on the host, and no existing kdamonds | Regions become `unknown`. |
 | `perf mem` (PEBS / IBS / SPE, events picked by the probe) | a memory-sampling PMU and perf permission | No sample overlay. |
-| `/proc/PID/pagemap` present bits | ptrace-read access | No resident totals and no quiet candidates. |
+| `/proc/PID/pagemap` present bits (+ `/proc/kpageflags` to exclude zero-page mappings) | ptrace-read access; root for kpageflags | No resident totals and no quiet candidates. Without kpageflags, only exclusively mapped pages count as resident. |
 | core (`gcore`) + exact `/proc/PID/exe` | `--objects`, ptrace, and DWARF in the binary | No object mapping. |
 
 ## Labels
@@ -53,6 +53,24 @@ Perf hits are counted separately. A sample without a hit is not evidence that no
 ## Object analysis
 
 `internal/xdebug` is a vendored and patched copy of `golang.org/x/debug` viewcore. The patch adds support for Go 1.24+ on-demand GC masks (`TFlagGCMaskOnDemand`). If metadata is missing, the pointer graph is marked as incomplete. See `internal/xdebug/README.md`.
+
+## Demo: VictoriaMetrics on a CoreOS host
+
+The host has no perf or gdb, so the tools run from a privileged container that shares the host PID namespace:
+
+```sh
+podman run -d --rm --name vm -p 8428:8428 docker.io/victoriametrics/victoria-metrics:v1.154.0
+sudo podman run -d --name gocold-tools --privileged --pid=host --net=host \
+  --security-opt label=disable -v /sys:/sys -v $PWD:/work registry.fedoraproject.org/fedora:44 sleep infinity
+sudo podman exec gocold-tools dnf install -y perf gdb
+testdata/vm-load.sh 60 &          # curl-based Prometheus text ingestion + queries
+P=$(podman inspect vm --format '{{.State.Pid}}')
+sudo podman exec gocold-tools /work/gocold record --pid $P --duration 90s --out /work/rec \
+  --objects --pprof-url http://127.0.0.1:8428/debug/pprof/heap
+sudo podman exec gocold-tools /work/gocold report /work/rec --to 38s    # busy window
+sudo podman exec gocold-tools /work/gocold report /work/rec --from 45s  # idle window
+sudo podman rm -f gocold-tools
+```
 
 ## Tests
 

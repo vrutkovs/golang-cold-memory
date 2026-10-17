@@ -82,23 +82,42 @@ func TestPinDetectsChange(t *testing.T) {
 }
 
 func TestResidentFrom(t *testing.T) {
-	const page = 4096
-	// Pages 0..7: present at 1,2,3,6.
-	var buf bytes.Buffer
-	for i := range 8 {
-		var v uint64
-		if i == 1 || i == 2 || i == 3 || i == 6 {
-			v = pagemapPresent
-		}
-		_ = binary.Write(&buf, binary.LittleEndian, v)
+	const (
+		page    = 4096
+		zeroPFN = 7
+		realPFN = 9
+	)
+	// Pages 0..7: 1,2 exclusive; 3 shared real page; 4 zero page;
+	// 5 shared with hidden PFN; 6 exclusive; 0,7 absent.
+	entries := map[int]uint64{
+		1: pagemapPresent | pagemapExclusive,
+		2: pagemapPresent | pagemapExclusive,
+		3: pagemapPresent | realPFN,
+		4: pagemapPresent | zeroPFN,
+		5: pagemapPresent,
+		6: pagemapPresent | pagemapExclusive,
 	}
-	got, err := residentFrom(bytes.NewReader(buf.Bytes()), []Range{{0, 8 * page}}, page)
+	var pm bytes.Buffer
+	for i := range 8 {
+		_ = binary.Write(&pm, binary.LittleEndian, entries[i])
+	}
+	kpf := make([]byte, 16*8)
+	binary.LittleEndian.PutUint64(kpf[zeroPFN*8:], kpfZeroPage)
+
+	got, err := residentFrom(bytes.NewReader(pm.Bytes()), bytes.NewReader(kpf), []Range{{0, 8 * page}}, page)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []Range{{page, 4 * page}, {6 * page, 7 * page}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("resident = %#v", got)
+	}
+
+	// Without kpageflags only exclusive pages are verified.
+	got, _ = residentFrom(bytes.NewReader(pm.Bytes()), nil, []Range{{0, 8 * page}}, page)
+	want = []Range{{page, 3 * page}, {6 * page, 7 * page}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("unprivileged resident = %#v", got)
 	}
 }
 
