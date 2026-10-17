@@ -32,25 +32,6 @@ func opts(pid int, out string, fs *damontest.FS) record.Options {
 	}
 }
 
-func TestTrackDisappearancesRequiresObjects(t *testing.T) {
-	o := opts(1, "unused", damontest.New("0"))
-	o.TrackDisappearances = true
-	if err := o.Validate(); err == nil || !strings.Contains(err.Error(), "--objects") {
-		t.Fatalf("expected --objects requirement, got %v", err)
-	}
-}
-
-func TestTrackDisappearancesDiskEstimate(t *testing.T) {
-	o := opts(1, "unused", damontest.New("0"))
-	o.Objects = true
-	maps := []proc.Mapping{{Rss: 1 << 20}}
-	base := record.Estimate(o, maps, 1024)
-	o.TrackDisappearances = true
-	if extra := record.Estimate(o, maps, 1024) - base; extra < 1<<20 {
-		t.Fatalf("second core reserved %d bytes, want at least 1 MiB", extra)
-	}
-}
-
 // fakeKernel answers snapshots like DAMON: blocks one aggregation, hot buffer accessed.
 func fakeKernel(t *testing.T, f *testutil.Fixture) *damontest.FS {
 	maps, err := proc.ReadMaps(f.Cmd.Process.Pid)
@@ -140,39 +121,6 @@ func TestRecordAndReport(t *testing.T) {
 	}
 	if quiet != len(f.Idle) {
 		t.Errorf("quiet idle objects = %d, want %d", quiet, len(f.Idle))
-	}
-}
-
-func TestTrackDisappearances(t *testing.T) {
-	if _, err := exec.LookPath("gcore"); err != nil {
-		t.Skip("gcore not installed")
-	}
-	f := testutil.StartFixture(t, nil)
-	out := filepath.Join(t.TempDir(), "rec")
-	o := opts(f.Cmd.Process.Pid, out, fakeKernel(t, f))
-	o.Objects, o.TrackDisappearances = true, true
-	if err := record.Run(context.Background(), o, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	m, err := store.ReadManifest(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.StartCore == nil || m.StartCore.Path == "" || m.StartCore.EndNS >= m.Core.StartNS || m.Core.Path == "" {
-		t.Fatalf("invalid core pair: start=%+v end=%+v", m.StartCore, m.Core)
-	}
-	for _, name := range []string{m.StartCore.Path, m.Core.Path} {
-		st, err := os.Stat(filepath.Join(out, name))
-		if err != nil || st.Mode().Perm() != 0o600 {
-			t.Fatalf("core %q: mode/err %v %v", name, st.Mode().Perm(), err)
-		}
-	}
-	r, err := report.Build(out, report.Options{Options: analysis.Options{Top: 10}, Objects: true, TopObjects: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.DisappearancesErr != "" || r.ObjectsErr != "" {
-		t.Fatalf("disappearances=%q objects=%q", r.DisappearancesErr, r.ObjectsErr)
 	}
 }
 

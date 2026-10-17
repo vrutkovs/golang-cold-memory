@@ -31,25 +31,16 @@ func CorePath(dir string, pid int) string {
 // the target while it dumps; callers must exclude this period from
 // access classification. An existing core file is never overwritten.
 func Capture(ctx context.Context, dir string, pid int) (string, []byte, error) {
-	return capture(ctx, dir, pid, CorePrefix)
-}
-
-// CaptureStart saves a distinct first core, leaving the final core path free.
-func CaptureStart(ctx context.Context, dir string, pid int) (string, []byte, error) {
-	return capture(ctx, dir, pid, "core-start")
-}
-
-func capture(ctx context.Context, dir string, pid int, prefix string) (string, []byte, error) {
 	gcore, err := exec.LookPath("gcore")
 	if err != nil {
 		return "", nil, fmt.Errorf("gcore (gdb) not installed")
 	}
-	out := filepath.Join(dir, prefix+"."+strconv.Itoa(pid))
+	out := CorePath(dir, pid)
 	if _, err := os.Lstat(out); err == nil {
 		return "", nil, fmt.Errorf("%s already exists; refusing to overwrite", out)
 	}
 
-	log, err := exec.CommandContext(ctx, gcore, "-o", filepath.Join(dir, prefix), strconv.Itoa(pid)).CombinedOutput()
+	log, err := exec.CommandContext(ctx, gcore, "-o", filepath.Join(dir, CorePrefix), strconv.Itoa(pid)).CombinedOutput()
 	if err != nil {
 		return "", log, fmt.Errorf("gcore: %w", err)
 	}

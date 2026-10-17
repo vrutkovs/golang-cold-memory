@@ -103,6 +103,21 @@ func TestAddressGrid(t *testing.T) {
 	}
 }
 
+func TestTickLabelsAboveAdjacentHeaders(t *testing.T) {
+	h := &Heatmap{Columns: make([]Column, 11), SiteRows: []Row{{Key: "type ← site", Rate: make([]*float64, 11), Coverage: make([]float64, 11)}}}
+	for i := range h.Columns {
+		h.Columns[i].StartNS = int64(i) * sec
+	}
+	h.Window.EndNS = 11 * sec
+	var out bytes.Buffer
+	if err := h.HTML(&out, Meta{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `<th class="t tick"><span>10s</span></th>`) || !strings.Contains(out.String(), `th.t.tick{z-index:2}`) {
+		t.Fatal("tick label must paint above adjacent sticky headers")
+	}
+}
+
 func TestColumnGroupingAndGaps(t *testing.T) {
 	x := input(t)
 	x.Snaps[3].T = 6 * sec // gap 3s..5s

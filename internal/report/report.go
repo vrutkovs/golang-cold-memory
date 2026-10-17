@@ -19,7 +19,6 @@ import (
 	"github.com/vrutkovs/golang-cold-memory/internal/perfmem"
 	"github.com/vrutkovs/golang-cold-memory/internal/proc"
 	"github.com/vrutkovs/golang-cold-memory/internal/store"
-	"github.com/vrutkovs/golang-cold-memory/internal/xdebug/gocore"
 )
 
 // Options configure a report.
@@ -50,16 +49,6 @@ type PprofSite struct {
 	Bytes    int64  `json:"inuse_bytes"`
 }
 
-// Disappearance brackets an object last seen reachable and first absent.
-// Reused addresses and objects not collected by GC remain indistinguishable.
-type Disappearance struct {
-	Addr          uint64 `json:"addr"`
-	Bytes         int64  `json:"bytes"`
-	Type          string `json:"type"`
-	LastSeenNS    int64  `json:"last_seen_ns"`
-	FirstAbsentNS int64  `json:"first_absent_ns"`
-}
-
 // Report is the full offline result.
 type Report struct {
 	Dir          string                      `json:"dir"`
@@ -72,23 +61,19 @@ type Report struct {
 	Settings     store.Settings              `json:"settings"`
 	Capabilities map[string]store.Capability `json:"capabilities"`
 	*analysis.Result
-	DAMONSnapshots    []store.DAMONSnapshot `json:"damon_snapshots"`
-	SampleMatches     []SampleMatch         `json:"sample_matches,omitempty"`
-	Objects           *objects.Result       `json:"objects,omitempty"`
-	ObjectsErr        string                `json:"objects_error,omitempty"`
-	Disappearances    []Disappearance       `json:"possible_disappearances,omitempty"`
-	DisappearedCount  int                   `json:"possible_disappeared_count,omitempty"`
-	DisappearedBytes  int64                 `json:"possible_disappeared_bytes,omitempty"`
-	DisappearancesErr string                `json:"disappearances_error,omitempty"`
-	StartCoreNS       int64                 `json:"start_core_ns,omitempty"`
-	CoreMissing       []proc.Range          `json:"core_missing_ranges,omitempty"`
-	CoreGapNS         int64                 `json:"core_after_final_snapshot_ns,omitempty"`
-	Pprof             []PprofSite           `json:"pprof_allocation_sites,omitempty"`
-	PprofErr          string                `json:"pprof_error,omitempty"`
-	Heatmap           *heatmap.Heatmap      `json:"heatmap"`
+	DAMONSnapshots []store.DAMONSnapshot `json:"damon_snapshots"`
+	SampleMatches  []SampleMatch         `json:"sample_matches,omitempty"`
+	Objects        *objects.Result       `json:"objects,omitempty"`
+	ObjectsErr     string                `json:"objects_error,omitempty"`
+	CoreMissing    []proc.Range          `json:"core_missing_ranges,omitempty"`
+	CoreGapNS      int64                 `json:"core_after_final_snapshot_ns,omitempty"`
+	Pprof          []PprofSite           `json:"pprof_allocation_sites,omitempty"`
+	PprofErr       string                `json:"pprof_error,omitempty"`
+	Heatmap        *heatmap.Heatmap      `json:"heatmap"`
 
-	textMap *heatmap.Heatmap
-	sites   map[string][]proc.Range // sampled object ranges by type ← site
+	textMap    *heatmap.Heatmap
+	sites      map[string][]proc.Range      // sampled object ranges by type ← site
+	quietSites map[uint64]map[string]uint64 // quiet region start → type/site → overlapping bytes
 }
 
 // addRange appends [start, end) to m[key], merging adjacent objects (e.g. one span).
@@ -134,9 +119,6 @@ func Build(dir string, o Options) (*Report, error) {
 		Settings: m.Settings, Capabilities: m.Capabilities, Result: res,
 		CoreMissing: m.Core.Missing, CoreGapNS: m.Core.SnapshotGapNS,
 	}
-	if m.StartCore != nil {
-		r.StartCoreNS = m.StartCore.StartNS
-	}
 	for _, s := range in.DAMON {
 		if s.T >= res.Window.StartNS && s.T <= res.Window.EndNS {
 			r.DAMONSnapshots = append(r.DAMONSnapshots, s)
@@ -148,11 +130,6 @@ func Build(dir string, o Options) (*Report, error) {
 
 	if o.Objects && m.Capabilities[store.CapCore].Available {
 		r.objects(dir, m, o)
-		if m.Settings.TrackDisappearances && r.ObjectsErr != "" {
-			r.DisappearancesErr = r.ObjectsErr
-		}
-	} else if m.Settings.TrackDisappearances {
-		r.DisappearancesErr = "end core unavailable or object analysis disabled"
 	}
 	if m.Capabilities[store.CapPprof].Available {
 		r.pprof(filepath.Join(dir, store.PprofFile), o.Top)
@@ -196,6 +173,7 @@ func (r *Report) objects(dir string, m *store.Manifest, o Options) {
 		if site != objects.NoSite {
 			addRange(r.sites, objects.SiteKey(name, site), start, end)
 		}
+		r.addQuietOverlap(name, site, start, end)
 	}
 	res, err := objects.Analyze(p, r.Visit, r.Label, addrs, objects.Options{
 		MaxPaths: o.MaxPaths, TopObjects: o.TopObjects, Sites: objects.NewSites(p), Each: each})
@@ -204,9 +182,6 @@ func (r *Report) objects(dir string, m *store.Manifest, o Options) {
 		return
 	}
 	r.Objects = res
-	if m.Settings.TrackDisappearances {
-		r.disappearances(dir, exe, p, m, o.TopObjects)
-	}
 
 	for i, mt := range res.Matches {
 		s := r.MatchSamples[i]
@@ -222,83 +197,21 @@ func (r *Report) objects(dir string, m *store.Manifest, o Options) {
 	}
 }
 
-// disappearances compares reachable objects across two complete core reads.
-func (r *Report) disappearances(dir, exe string, end *gocore.Process, m *store.Manifest, limit int) {
-	if m.StartCore == nil || m.StartCore.Path == "" || m.StartCore.ExeSHA256 != m.Core.ExeSHA256 || m.StartCore.EndNS >= m.Core.StartNS {
-		r.DisappearancesErr = "start or end core missing, mismatched or unordered"
-		return
-	}
-	endObjects, err := objects.Snapshot(end)
-	if err != nil {
-		r.DisappearancesErr = err.Error()
-		return
-	}
-	endByAddr := make(map[uint64]objects.Identity, len(endObjects))
-	for _, obj := range endObjects {
-		endByAddr[obj.Addr] = obj
-	}
-	start, err := objects.Load(filepath.Join(dir, m.StartCore.Path), exe)
-	if err != nil {
-		r.DisappearancesErr = err.Error()
-		return
-	}
-	if start.BuildVersion() != m.Binary.GoVersion {
-		r.DisappearancesErr = "start core runtime does not match binary"
-		return
-	}
-	startObjects, err := objects.Snapshot(start)
-	if err != nil {
-		r.DisappearancesErr = err.Error()
-		return
-	}
-	r.Disappearances, r.DisappearedCount, r.DisappearedBytes = disappearanceWindows(
-		startObjects, endByAddr, m.Core.Missing, m.StartCore.StartNS, m.Core.EndNS, limit)
-}
-
-// disappearanceWindows omits addresses missing from the final core to avoid false absences.
-func disappearanceWindows(start []objects.Identity, end map[uint64]objects.Identity, missing []proc.Range, last, first int64, limit int) ([]Disappearance, int, int64) {
-	var rows []Disappearance
-	var count int
-	var bytes int64
-	missing = proc.Normalize(missing)
-	for _, obj := range start {
-		if cur, ok := end[obj.Addr]; ok && cur.Size == obj.Size && cur.Type == obj.Type {
+// addQuietOverlap attributes only object bytes inside quiet regions, not whole objects.
+func (r *Report) addQuietOverlap(name, site string, start, end uint64) {
+	for i := sort.Search(len(r.Regions), func(i int) bool { return r.Regions[i].End > start }); i < len(r.Regions) && r.Regions[i].Start < end; i++ {
+		region := r.Regions[i]
+		if region.Label != analysis.Quiet {
 			continue
 		}
-		if obj.Size <= 0 {
-			continue
+		if r.quietSites == nil {
+			r.quietSites = make(map[uint64]map[string]uint64)
 		}
-		j := sort.Search(len(missing), func(i int) bool { return missing[i].End > obj.Addr })
-		if j < len(missing) && missing[j].Start < obj.Addr+uint64(obj.Size) {
-			continue
+		if r.quietSites[region.Start] == nil {
+			r.quietSites[region.Start] = make(map[string]uint64)
 		}
-		count++
-		bytes += obj.Size
-		if limit <= 0 {
-			continue
-		}
-		x := Disappearance{Addr: obj.Addr, Bytes: obj.Size, Type: obj.Type, LastSeenNS: last, FirstAbsentNS: first}
-		if len(rows) < limit {
-			rows = append(rows, x)
-			continue
-		}
-		weakest := 0
-		for i := range rows {
-			if rows[i].Bytes < rows[weakest].Bytes || rows[i].Bytes == rows[weakest].Bytes && rows[i].Addr > rows[weakest].Addr {
-				weakest = i
-			}
-		}
-		if x.Bytes > rows[weakest].Bytes || x.Bytes == rows[weakest].Bytes && x.Addr < rows[weakest].Addr {
-			rows[weakest] = x
-		}
+		r.quietSites[region.Start][objects.SiteKey(name, site)] += min(end, region.End) - max(start, region.Start)
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Bytes != rows[j].Bytes {
-			return rows[i].Bytes > rows[j].Bytes
-		}
-		return rows[i].Addr < rows[j].Addr
-	})
-	return rows, count, bytes
 }
 
 // pprof summarizes sampled allocation sites; never joined to addresses.
@@ -340,17 +253,35 @@ func (r *Report) pprof(path string, top int) {
 
 // WriteHTML writes the heatmap page to path (0600, never overwriting).
 func (r *Report) WriteHTML(path string) error {
-	m := heatmap.Meta{Dir: r.Dir, PID: r.Target.PID, GoVersion: r.Binary.GoVersion, Kernel: r.Kernel}
-	if r.Settings.TrackDisappearances {
-		v := &heatmap.DisappearanceView{Count: r.DisappearedCount, Bytes: human(uint64(r.DisappearedBytes)), Error: r.DisappearancesErr}
-		for _, x := range r.Disappearances {
-			v.Rows = append(v.Rows, heatmap.DisappearanceRow{
-				Addr: fmt.Sprintf("%#x", x.Addr), Size: human(uint64(x.Bytes)), Type: x.Type,
-				LastSeen:    fmt.Sprintf("%.1fs", float64(x.LastSeenNS-r.StartCoreNS)/1e9),
-				FirstAbsent: fmt.Sprintf("%.1fs", float64(x.FirstAbsentNS-r.StartCoreNS)/1e9),
-			})
+	m := heatmap.Meta{Dir: r.Dir, PID: r.Target.PID, GoVersion: r.Binary.GoVersion,
+		Kernel: r.Kernel, QuietBytes: human(r.Totals.QuietBytes)}
+	var quietRegions []analysis.Region
+	for _, region := range r.Regions {
+		if region.Label == analysis.Quiet {
+			quietRegions = append(quietRegions, region)
 		}
-		m.Disappearances = v
+	}
+	sort.Slice(quietRegions, func(i, j int) bool { return quietRegions[i].Size() > quietRegions[j].Size() })
+	for _, region := range quietRegions {
+		view := heatmap.QuietRegionView{
+			Address: fmt.Sprintf("%#x–%#x", region.Start, region.End),
+			Size:    human(region.Size()), CoreObjects: human(uint64(region.ObjectBytes)),
+		}
+		for key, bytes := range r.quietSites[region.Start] {
+			view.Sites = append(view.Sites, heatmap.QuietSiteView{Key: key, Bytes: human(bytes)})
+		}
+		sort.Slice(view.Sites, func(i, j int) bool {
+			return r.quietSites[region.Start][view.Sites[i].Key] > r.quietSites[region.Start][view.Sites[j].Key]
+		})
+		m.QuietRegions = append(m.QuietRegions, view)
+	}
+	if r.Objects != nil {
+		m.HasCore = true
+		var quiet int64
+		for _, g := range r.Objects.ByType {
+			quiet += g.Labels[objects.LabelQuiet]
+		}
+		m.QuietObjects = human(uint64(quiet))
 	}
 	return r.Heatmap.WriteHTML(path, m)
 }

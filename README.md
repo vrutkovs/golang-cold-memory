@@ -15,7 +15,6 @@ go build -o gocold ./cmd/gocold
 ```sh
 gocold probe  --pid PID                                  # prerequisites; changes nothing
 gocold record --pid PID --duration 60s --out DIR [--objects] [--pprof-url URL]
-gocold record --pid PID --duration 60s --out DIR --objects --track-disappearances
 gocold report DIR [--json] [--from 10s --to 50s]
 ```
 
@@ -44,7 +43,8 @@ A perf hit inside the window changes its page from `quiet-candidate` to `observe
 
 `report` prints a glyph heatmap (address bins × time; `-` unmonitored, `.` no access observed, `1`–`7` rate levels) and writes it to JSON (`heatmap`). `--html FILE` writes a self-contained HTML page (new file, mode 0600):
 
-- **Address rows** (text and JSON only): monitored space binned to `--heatmap-rows`. Each never-monitored range is one collapsed row.
+- **Full address grid** (text and JSON only): monitored space binned to `--heatmap-rows`. Each never-monitored range is one collapsed row.
+- **Quiet candidates** (HTML): monitored resident bytes without observed access. Quiet regions follow allocation-site heatmap, sorted by size; core-time overlapping objects show type, sampled allocation site (or “not sampled”), and overlap bytes. A whole object is quiet only when all its bytes meet quiet criteria; overlap alone does not prove that.
 - **Columns:** DAMON snapshots, grouped to fit `--heatmap-cols`. Red borders mark time gaps.
 - **Cells:** byte-weighted DAMON access rate on a discrete legend. A dashed outline means partly monitored. Hover a cell for the numbers.
 - **Allocation-site rows** (with a core; the only HTML table): all known sampled allocation sites, grouped separately by type and first non-runtime allocation frame. `--heatmap-types=N` optionally caps the largest N groups (default `0`: no cap). Their placement is projected over the whole window, so earlier cells may describe other objects.
@@ -58,10 +58,6 @@ Objects the analyzer can't type from roots fall back to the type in their malloc
 The runtime attaches one allocation stack to every object it samples for the heap profile (about one per `MemProfileRate` bytes allocated, 512 KiB by default, so large objects are almost always sampled). `report` reads these records from the core and groups objects by type and allocation site (`type ← pkg.Func (dir/file.go:line)`, first non-runtime frame; for inlined calls the line is in the inlined callee). One type can have many site rows, each with its own access rates. The text report lists every sampled site with the most quiet bytes first, the HTML has a "By type and allocation site" table, and JSON keeps the full stack for listed objects in `alloc_stack`.
 
 Unsampled objects have no site, so totals per site undercount. For more coverage, restart the target with `GODEBUG=memprofilerate=4096` (lower = more coverage and more overhead). Binaries that never link `runtime.MemProfile` (no `net/http/pprof` or `runtime/pprof` import) run with `MemProfileRate=0` and record no sites.
-
-### Possible disappearance windows
-
-Opt in with `--objects --track-disappearances` to capture one core before monitoring and one after. The text, JSON, and HTML reports list largest objects reachable in the first core but absent or changed at the same address in the second. The conservative window spans both core captures, from the start of the first to the end of the second. It does not show when GC ran or prove an object was collected: it may have become unreachable without GC, and reuse of an address by an identical object can hide a disappearance. Incomplete core ranges are excluded. This mode pauses the target twice and needs space for two core dumps; the report limits listed objects with `--top-objects` but keeps total counts and bytes. Core contents can contain secrets.
 
 ## Safety
 

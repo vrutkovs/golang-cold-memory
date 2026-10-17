@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,54 +58,119 @@ func TestTextSitesColumns(t *testing.T) {
 	}
 }
 
-func TestDisappearanceWindows(t *testing.T) {
-	start := []objects.Identity{
-		{Addr: 0x500, Size: 8, Type: "small"},
-		{Addr: 0x1000, Size: 32, Type: "old"},
-		{Addr: 0x2000, Size: 64, Type: "stable"},
-		{Addr: 0x3000, Size: 16, Type: "missing-page"},
+func TestReportOmitsDisappearances(t *testing.T) {
+	var r Report
+	legacy := `{"settings":{"track_disappearances":true},"possible_disappeared_count":1,"possible_disappearances":[{"addr":4096,"bytes":32,"type":"[]byte"}]}`
+	if err := json.Unmarshal([]byte(legacy), &r); err != nil {
+		t.Fatal(err)
 	}
-	end := map[uint64]objects.Identity{
-		0x1000: {Addr: 0x1000, Size: 32, Type: "replacement"},
-		0x2000: {Addr: 0x2000, Size: 64, Type: "stable"},
-	}
-	rows, count, bytes := disappearanceWindows(start, end, []proc.Range{{Start: 0x3000, End: 0x4000}}, 10, 20, 1)
-	if count != 2 || bytes != 40 || len(rows) != 1 || rows[0].Type != "old" || rows[0].LastSeenNS != 10 || rows[0].FirstAbsentNS != 20 {
-		t.Fatalf("disappearances = %+v count=%d bytes=%d", rows, count, bytes)
-	}
-}
+	r.Result, r.Heatmap, r.textMap = &analysis.Result{}, &heatmap.Heatmap{}, &heatmap.Heatmap{}
 
-func TestTextDisappearanceWindows(t *testing.T) {
-	r := &Report{DisappearedCount: 1, DisappearedBytes: 32, StartCoreNS: 5 * sec,
-		Disappearances: []Disappearance{{Addr: 0x1000, Bytes: 32, Type: "[]byte", LastSeenNS: 10 * sec, FirstAbsentNS: 20 * sec}}}
-	var out bytes.Buffer
-	r.textDisappearances(func(format string, args ...any) { fmt.Fprintf(&out, format+"\n", args...) }, 10)
-	for _, want := range []string{"possible disappearances", "[]byte", "0x1000", "5s", "15s", "not proof of GC"} {
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("missing %q: %s", want, out.String())
-		}
+	var text, js bytes.Buffer
+	r.Text(&text, 10)
+	if err := r.JSON(&js); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestHTMLDisappearanceWindows(t *testing.T) {
-	r := &Report{Heatmap: &heatmap.Heatmap{}, Settings: store.Settings{TrackDisappearances: true},
-		DisappearedCount: 1, DisappearedBytes: 32,
-		Disappearances: []Disappearance{{Addr: 0x1000, Bytes: 32, Type: "<script>", LastSeenNS: 10 * sec, FirstAbsentNS: 20 * sec}}}
 	path := filepath.Join(t.TempDir(), "heatmap.html")
 	if err := r.WriteHTML(path); err != nil {
 		t.Fatal(err)
 	}
-	out, err := os.ReadFile(path)
+	html, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Possible disappearances", "0x1000", "&lt;script&gt;", "not proof of GC"} {
-		if !strings.Contains(string(out), want) {
-			t.Fatalf("HTML missing %q", want)
+	for _, output := range []string{text.String(), js.String(), string(html)} {
+		if strings.Contains(output, "possible disappearances") || strings.Contains(output, "Possible disappearances") || strings.Contains(output, "possible_disappeared") {
+			t.Fatalf("disappearance section leaked into report: %.200s", output)
 		}
 	}
-	if strings.Contains(string(out), "<bdi><script>") || strings.Contains(string(out), `title="<script>"`) {
-		t.Error("object type must be escaped")
+}
+
+func TestHTMLHighlightsQuietBytes(t *testing.T) {
+	r := &Report{Result: &analysis.Result{Totals: analysis.Totals{QuietBytes: 4096}}, Heatmap: &heatmap.Heatmap{}}
+	path := filepath.Join(t.TempDir(), "heatmap.html")
+	if err := r.WriteHTML(path); err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), "Quiet candidates") || !strings.Contains(string(html), "4.0 KiB") || !strings.Contains(string(html), "no access observed") {
+		t.Fatalf("quiet evidence absent from HTML: %.600s", html)
+	}
+}
+
+func TestHTMLHighlightsQuietObjects(t *testing.T) {
+	r := &Report{Result: &analysis.Result{Totals: analysis.Totals{QuietBytes: 4096}}, Heatmap: &heatmap.Heatmap{},
+		Objects: &objects.Result{ByType: []objects.Group{{Labels: map[string]int64{objects.LabelQuiet: 2048}}}}}
+	path := filepath.Join(t.TempDir(), "heatmap.html")
+	if err := r.WriteHTML(path); err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), "Quiet objects") || !strings.Contains(string(html), "2.0 KiB") {
+		t.Fatalf("fully quiet object evidence absent from HTML: %.600s", html)
+	}
+}
+
+func TestHTMLListsQuietRegions(t *testing.T) {
+	r := &Report{Result: &analysis.Result{
+		Totals: analysis.Totals{QuietBytes: 4096},
+		Regions: []analysis.Region{
+			{Start: 0x1000, End: 0x2000, Label: analysis.Quiet, ObjectBytes: 2048},
+			{Start: 0x3000, End: 0x4000, Label: analysis.Observed},
+		},
+	}, Heatmap: &heatmap.Heatmap{}, Objects: &objects.Result{}}
+	path := filepath.Join(t.TempDir(), "heatmap.html")
+	if err := r.WriteHTML(path); err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), "0x1000–0x2000") || !strings.Contains(string(html), "Core object overlap") || strings.Contains(string(html), "0x3000–0x4000") {
+		t.Fatalf("quiet regions not isolated: %.600s", html)
+	}
+}
+
+func TestHTMLQuietRegionSites(t *testing.T) {
+	r := &Report{Result: &analysis.Result{
+		Totals:  analysis.Totals{QuietBytes: 4096},
+		Regions: []analysis.Region{{Start: 0x1000, End: 0x2000, Label: analysis.Quiet, ObjectBytes: 256}},
+	}, Heatmap: &heatmap.Heatmap{SiteRows: []heatmap.Row{{Key: "sample ← pkg.fn"}}}, Objects: &objects.Result{}}
+	r.quietSites = map[uint64]map[string]uint64{0x1000: {objects.SiteKey("<type>", "pkg.fn"): 128, objects.SiteKey("<type>", objects.NoSite): 128}}
+	path := filepath.Join(t.TempDir(), "heatmap.html")
+	if err := r.WriteHTML(path); err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(html)
+	if !strings.Contains(s, "&lt;type&gt;") || !strings.Contains(s, "pkg.fn") || !strings.Contains(s, objects.NoSite) || !strings.Contains(s, "overlap bytes") {
+		t.Fatalf("quiet region attribution missing: %s", s)
+	}
+	if strings.Index(s, "Quiet regions (1)") <= strings.Index(s, "By type and allocation site") || strings.Contains(s, "<details open><summary>Quiet regions") {
+		t.Fatal("quiet regions must follow allocation site heatmap, uncollapsed")
+	}
+}
+
+func TestQuietRegionOverlapOnly(t *testing.T) {
+	r := &Report{Result: &analysis.Result{Regions: []analysis.Region{
+		{Start: 0x1000, End: 0x1100, Label: analysis.Quiet},
+		{Start: 0x1100, End: 0x1200, Label: analysis.Observed},
+		{Start: 0x1200, End: 0x1300, Label: analysis.Quiet},
+	}}}
+	r.addQuietOverlap("buffer", "pkg.alloc", 0x1080, 0x1280)
+	key := objects.SiteKey("buffer", "pkg.alloc")
+	if len(r.quietSites) != 2 || r.quietSites[0x1000][key] != 0x80 || r.quietSites[0x1200][key] != 0x80 {
+		t.Fatalf("quiet overlap includes observed memory or omits quiet memory: %+v", r.quietSites)
 	}
 }
 

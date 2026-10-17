@@ -72,7 +72,6 @@ func recordFlags(fs *flag.FlagSet) (*record.Options, func()) {
 	fs.DurationVar(&o.Duration, "duration", 60*time.Second, "observation window")
 	fs.StringVar(&o.Out, "out", "", "private output directory (created 0700, must be new or empty)")
 	fs.BoolVar(&o.Objects, "objects", false, "capture a core + exact executable at the end (pauses target; may contain secrets)")
-	fs.BoolVar(&o.TrackDisappearances, "track-disappearances", false, "capture start and end cores to estimate object disappearance windows (requires --objects; pauses target twice)")
 	fs.DurationVar(&o.SnapshotInterval, "snapshot-interval", 0, "DAMON snapshot interval (default = aggregation interval; larger leaves time gaps)")
 	fs.DurationVar(&o.MapsInterval, "maps-interval", 10*time.Second, "mapping/residency recheck interval")
 	fs.DurationVar(&sample, "sample", 20*time.Millisecond, "DAMON sampling interval")
