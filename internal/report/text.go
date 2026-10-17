@@ -68,6 +68,7 @@ func (r *Report) Text(w io.Writer, top int) {
 	}
 
 	r.textRegions(p, top)
+	r.textMap.Text(w)
 	r.textObjects(p, top)
 
 	if len(r.Pprof) > 0 || r.PprofErr != "" {

@@ -28,6 +28,9 @@ type Classifier func(start, end uint64) string
 type Options struct {
 	MaxPaths   int // reference paths computed in total
 	TopObjects int // quiet/mixed objects listed
+
+	// Each, when set, receives every object's type name and address range.
+	Each func(name string, start, end uint64)
 }
 
 // Group aggregates objects by type or owner.
@@ -99,6 +102,9 @@ func Analyze(p *gocore.Process, visit, label Classifier, addrs []uint64, o Optio
 		res.Objects++
 		res.Bytes += sz
 		addTo(byType, name, sz, l)
+		if o.Each != nil {
+			o.Each(name, a, a+uint64(sz))
+		}
 		if l == LabelQuiet || l == LabelMixed {
 			notable = append(notable, x)
 			labels[x] = l

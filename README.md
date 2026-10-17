@@ -39,6 +39,16 @@ gocold report DIR [--json] [--from 10s --to 50s]
 
 A perf hit inside the window changes its page from `quiet-candidate` to `observed-access`, because DAMON can miss sparse access at region resolution. This needs perf and DAMON to share a clock. A sample without a hit is not evidence that no access happened. A sample-to-object match is only a *core-time candidate* because the address can be reused. An object is `quiet-candidate` only if all of it lies in quiet regions. Otherwise it is `mixed` or `unknown`. A slice with `len=0` is still allocated spare capacity.
 
+## Heatmap
+
+`report` prints a glyph heatmap (address bins × time; `-` unmonitored, `.` no access observed, `1`–`7` rate levels) and writes it to JSON (`heatmap`). `--html FILE` writes a self-contained HTML page (new file, mode 0600):
+
+- **Address rows:** monitored space binned to `--heatmap-rows`. Each never-monitored range is one collapsed, hatched row.
+- **Columns:** DAMON snapshots, grouped to fit `--heatmap-cols`. Red borders mark time gaps.
+- **Cells:** byte-weighted DAMON access rate on a discrete legend. A dashed outline means partly monitored; a blue dot means perf samples. Hover a cell for the numbers.
+- **Type rows** (with a core): the largest `--heatmap-types` core-time types. Their placement is projected over the whole window, so earlier cells may describe other objects.
+- Rows sort by address, mean or max rate, perf hits, or size. Names are HTML-escaped.
+
 ## Safety
 
 - The output directory has mode 0700 and the files have mode 0600. Existing files are never overwritten or deleted. Nothing is uploaded.
@@ -69,6 +79,7 @@ sudo podman exec gocold-tools /work/gocold record --pid $P --duration 90s --out 
   --objects --pprof-url http://127.0.0.1:8428/debug/pprof/heap
 sudo podman exec gocold-tools /work/gocold report /work/rec --to 38s    # busy window
 sudo podman exec gocold-tools /work/gocold report /work/rec --from 45s  # idle window
+sudo podman exec gocold-tools /work/gocold report /work/rec --html /work/heatmap.html
 sudo podman rm -f gocold-tools
 ```
 

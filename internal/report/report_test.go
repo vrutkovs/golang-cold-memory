@@ -14,6 +14,7 @@ import (
 	"github.com/vrutkovs/golang-cold-memory/internal/analysis"
 	"github.com/vrutkovs/golang-cold-memory/internal/coredump"
 	"github.com/vrutkovs/golang-cold-memory/internal/damon"
+	"github.com/vrutkovs/golang-cold-memory/internal/heatmap"
 	"github.com/vrutkovs/golang-cold-memory/internal/objects"
 	"github.com/vrutkovs/golang-cold-memory/internal/perfmem"
 	"github.com/vrutkovs/golang-cold-memory/internal/proc"
@@ -29,6 +30,7 @@ func reportOpts() Options {
 		Objects:    true,
 		MaxPaths:   50,
 		TopObjects: 20,
+		Heatmap:    heatmap.Options{MaxRows: 64, MaxCols: 30, MaxTypes: 10},
 	}
 }
 
@@ -153,13 +155,40 @@ func TestReportEndToEnd(t *testing.T) {
 		t.Errorf("match = %+v", sm)
 	}
 
+	// Heatmap agrees with region analysis: hot buffer accessed, idle type never.
+	hm := r.Heatmap
+	var hotMax, idleMax float64 = 0, -1
+	for _, row := range hm.Rows {
+		if row.Start <= f.Hot.Addr && f.Hot.Addr < row.End {
+			hotMax = row.MaxRate
+		}
+	}
+	for _, row := range hm.TypeRows {
+		if row.Key == "[8388608]uint8" {
+			idleMax = row.MaxRate
+		}
+	}
+	if hotMax == 0 || idleMax != 0 {
+		t.Errorf("heatmap hot max=%v idle type max=%v", hotMax, idleMax)
+	}
+	htmlPath := filepath.Join(t.TempDir(), "hm.html")
+	if err := r.WriteHTML(htmlPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.WriteHTML(htmlPath); err == nil {
+		t.Error("existing HTML overwritten")
+	}
+
 	var text, js bytes.Buffer
 	r.Text(&text, 10)
 	t.Log("\n" + text.String())
 	if !strings.Contains(text.String(), "quiet candidate") {
 		t.Errorf("text output:\n%s", text.String())
 	}
-	if err := r.JSON(&js); err != nil || !strings.Contains(js.String(), `"damon_snapshots"`) {
+	if !strings.Contains(text.String(), "heatmap (") {
+		t.Error("text lacks heatmap")
+	}
+	if err := r.JSON(&js); err != nil || !strings.Contains(js.String(), `"damon_snapshots"`) || !strings.Contains(js.String(), `"type_rows"`) {
 		t.Errorf("json err=%v", err)
 	}
 }

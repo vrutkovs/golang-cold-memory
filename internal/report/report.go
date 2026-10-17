@@ -14,6 +14,7 @@ import (
 
 	"github.com/vrutkovs/golang-cold-memory/internal/analysis"
 	"github.com/vrutkovs/golang-cold-memory/internal/coredump"
+	"github.com/vrutkovs/golang-cold-memory/internal/heatmap"
 	"github.com/vrutkovs/golang-cold-memory/internal/objects"
 	"github.com/vrutkovs/golang-cold-memory/internal/perfmem"
 	"github.com/vrutkovs/golang-cold-memory/internal/proc"
@@ -26,7 +27,11 @@ type Options struct {
 	Objects    bool
 	MaxPaths   int
 	TopObjects int
+	Heatmap    heatmap.Options
 }
+
+// textHeatmap bounds the terminal heatmap.
+var textHeatmap = heatmap.Options{MaxRows: 24, MaxCols: 60, MaxTypes: 10}
 
 // SampleMatch ties one in-window perf sample to a core-time object candidate.
 type SampleMatch struct {
@@ -64,6 +69,10 @@ type Report struct {
 	CoreGapNS      int64                 `json:"core_after_final_snapshot_ns,omitempty"`
 	Pprof          []PprofSite           `json:"pprof_allocation_sites,omitempty"`
 	PprofErr       string                `json:"pprof_error,omitempty"`
+	Heatmap        *heatmap.Heatmap      `json:"heatmap"`
+
+	textMap *heatmap.Heatmap
+	types   map[string][]proc.Range // core-time object ranges by type
 }
 
 // Build loads dir and analyzes it.
@@ -113,6 +122,11 @@ func Build(dir string, o Options) (*Report, error) {
 	if m.Capabilities[store.CapPprof].Available {
 		r.pprof(filepath.Join(dir, store.PprofFile), o.Top)
 	}
+
+	hm := heatmap.Input{In: in, Res: res, Snaps: r.DAMONSnapshots, Types: r.types, Option: o.Heatmap}
+	r.Heatmap = heatmap.Build(hm)
+	hm.Option = textHeatmap
+	r.textMap = heatmap.Build(hm)
 	return r, nil
 }
 
@@ -142,7 +156,17 @@ func (r *Report) objects(dir string, m *store.Manifest, o Options) {
 	for i, s := range r.MatchSamples {
 		addrs[i] = s.Addr
 	}
-	res, err := objects.Analyze(p, r.Visit, r.Label, addrs, objects.Options{MaxPaths: o.MaxPaths, TopObjects: o.TopObjects})
+	r.types = map[string][]proc.Range{}
+	each := func(name string, start, end uint64) {
+		rs := r.types[name]
+		if n := len(rs); n > 0 && rs[n-1].End == start {
+			rs[n-1].End = end // adjacent objects of one type, e.g. a span
+		} else {
+			rs = append(rs, proc.Range{Start: start, End: end})
+		}
+		r.types[name] = rs
+	}
+	res, err := objects.Analyze(p, r.Visit, r.Label, addrs, objects.Options{MaxPaths: o.MaxPaths, TopObjects: o.TopObjects, Each: each})
 	if err != nil {
 		r.ObjectsErr = err.Error()
 		return
@@ -198,6 +222,11 @@ func (r *Report) pprof(path string, top int) {
 	if len(r.Pprof) > top {
 		r.Pprof = r.Pprof[:top]
 	}
+}
+
+// WriteHTML writes the heatmap page to path (0600, never overwriting).
+func (r *Report) WriteHTML(path string) error {
+	return r.Heatmap.WriteHTML(path, heatmap.Meta{Dir: r.Dir, PID: r.Target.PID, GoVersion: r.Binary.GoVersion, Kernel: r.Kernel})
 }
 
 // JSON writes the full report.

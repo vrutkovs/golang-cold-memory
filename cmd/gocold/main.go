@@ -143,6 +143,10 @@ func runReport(args []string) error {
 	var o report.Options
 	var from, to time.Duration
 	asJSON := fs.Bool("json", false, "JSON output")
+	htmlOut := fs.String("html", "", "write self-contained HTML heatmap to this new file")
+	fs.IntVar(&o.Heatmap.MaxRows, "heatmap-rows", 256, "heatmap address rows (monitored space is binned)")
+	fs.IntVar(&o.Heatmap.MaxCols, "heatmap-cols", 120, "heatmap time columns (snapshots are grouped)")
+	fs.IntVar(&o.Heatmap.MaxTypes, "heatmap-types", 40, "heatmap core-time type rows, largest first")
 	fs.DurationVar(&from, "from", 0, "window start, offset from first DAMON coverage")
 	fs.DurationVar(&to, "to", 0, "window end offset (0 = last snapshot)")
 	fs.Float64Var(&o.FreqRate, "freq-rate", 0.5, "frequent access: fraction of DAMON sampling checks per aggregation")
@@ -172,6 +176,12 @@ func runReport(args []string) error {
 	r, err := report.Build(dir, o)
 	if err != nil {
 		return err
+	}
+	if *htmlOut != "" {
+		if err := r.WriteHTML(*htmlOut); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "heatmap written to %s\n", *htmlOut)
 	}
 	if *asJSON {
 		return r.JSON(os.Stdout)
