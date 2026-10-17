@@ -167,17 +167,26 @@ func TestPerfOverlayAndObjectLabels(t *testing.T) {
 	}
 	res := Run(in, opts())
 
-	// A perf hit in a DAMON-quiet region is counted, not relabeled.
-	q := res.Regions[2]
-	if q.Label != Quiet || q.PerfSamples != 1 || q.LatestSource != "perf sample" {
-		t.Errorf("quiet region overlay = %+v", q)
+	// A timed perf hit relabels only its page inside the DAMON-quiet region.
+	check(t, res, []want{
+		{0x10000, 0x20000, Frequent},
+		{0x20000, 0x30000, Observed},
+		{0x30000, 0x31000, Quiet},
+		{0x31000, 0x32000, Observed},
+		{0x32000, 0x48000, Quiet},
+		{0x48000, 0x50000, Unknown},
+	})
+	hit := res.Regions[3]
+	if !slices.Contains(hit.Reasons, ReasonPerfHit) || hit.PerfSamples != 1 || hit.LatestSource != "perf sample" {
+		t.Errorf("perf hit region = %+v", hit)
 	}
 	if res.Totals.PerfSamples != 2 || res.Totals.PerfOutside != 1 || len(res.Totals.PerfExcluded) != 2 {
 		t.Errorf("perf totals = %+v", res.Totals)
 	}
 
 	cases := map[[2]uint64]string{
-		{0x31000, 0x32000}: objects.LabelQuiet,
+		{0x31000, 0x32000}: objects.LabelObserved,
+		{0x33000, 0x34000}: objects.LabelQuiet,
 		{0x2f000, 0x31000}: objects.LabelMixed,
 		{0x47000, 0x49000}: objects.LabelMixed, // quiet + non-resident
 		{0x10000, 0x11000}: objects.LabelObserved,
@@ -201,5 +210,19 @@ func TestPerfOnlyWindow(t *testing.T) {
 	}
 	if res.Totals.QuietBytes != 0 {
 		t.Error("perf absence must not create quiet candidates")
+	}
+}
+
+// Without a shared clock a hit can't be placed in the window: no relabel.
+func TestPerfHitNeedsClock(t *testing.T) {
+	in := baseInput()
+	in.M.Perf.Clock = perfmem.ClockLocal
+	in.Samples = []perfmem.Sample{{TimeNS: 2 * sec, Addr: 0x31000}}
+	res := Run(in, opts())
+	if l := res.Label(0x31000, 0x32000); l != objects.LabelQuiet {
+		t.Errorf("label = %s", l)
+	}
+	if r := res.Regions[res.Find(0x31000)]; r.PerfSamples != 1 {
+		t.Errorf("sample not counted: %+v", r)
 	}
 }

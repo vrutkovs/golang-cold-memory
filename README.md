@@ -37,7 +37,7 @@ gocold report DIR [--json] [--from 10s --to 50s]
 - `quiet-candidate`: monitored in every snapshot with no time gaps, mapping stable, resident the whole time, and no access observed.
 - `unknown`: anything else. The report lists the reasons.
 
-Perf hits are counted separately. A sample without a hit is not evidence that no access happened. A sample-to-object match is only a *core-time candidate* because the address can be reused. An object is `quiet-candidate` only if all of it lies in quiet regions. Otherwise it is `mixed` or `unknown`. A slice with `len=0` is still allocated spare capacity.
+A perf hit inside the window changes its page from `quiet-candidate` to `observed-access`, because DAMON can miss sparse access at region resolution. This needs perf and DAMON to share a clock. A sample without a hit is not evidence that no access happened. A sample-to-object match is only a *core-time candidate* because the address can be reused. An object is `quiet-candidate` only if all of it lies in quiet regions. Otherwise it is `mixed` or `unknown`. A slice with `len=0` is still allocated spare capacity.
 
 ## Safety
 

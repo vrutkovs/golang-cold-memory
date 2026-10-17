@@ -12,6 +12,7 @@
 package analysis
 
 import (
+	"slices"
 	"sort"
 	"strings"
 
@@ -39,6 +40,7 @@ const (
 	ReasonMapChanged = "mapping changed during window"
 	ReasonResUnknown = "residency unknown"
 	ReasonNotRes     = "not resident throughout window (uncommitted, swapped or reclaimed)"
+	ReasonPerfHit    = "perf sample hit in window; DAMON missed it at region resolution"
 )
 
 // Options select the window and thresholds.
@@ -142,6 +144,9 @@ type counters struct {
 	cov, acc, freq   int
 	u, s, m, r, init int
 }
+
+// defaultPageSize applies when the manifest lacks host page size.
+const defaultPageSize = 4096
 
 const (
 	kCov = iota
@@ -248,6 +253,7 @@ func Run(in Input, o Options) *Result {
 		res.Notes = append(res.Notes, "residency unavailable: resident-byte totals omitted, quiet candidates impossible")
 	}
 
+	res.markPerfHits(in, pageSize(m))
 	res.regionStats(snaps, maxChecks, o.FreqRate)
 	res.overlayPerf(in, o)
 	res.totals()
@@ -453,6 +459,64 @@ func (res *Result) regionStats(snaps []store.DAMONSnapshot, maxChecks, freqRate 
 		if len(snaps) > 0 {
 			r.MeanRate = rateSum / float64(len(snaps))
 			r.FrequentShare = float64(freq) / float64(len(snaps))
+		}
+	}
+}
+
+func pageSize(m *store.Manifest) uint64 {
+	if m.Host.PageSize > 0 {
+		return m.Host.PageSize
+	}
+	return defaultPageSize
+}
+
+// markPerfHits relabels the page of every in-window perf hit inside a
+// quiet-candidate region as observed-access: a timed hit proves access,
+// DAMON's per-region sampling can miss sparse access. Needs perf timestamps
+// on the DAMON clock; otherwise hits can't be placed in the window.
+func (res *Result) markPerfHits(in Input, page uint64) {
+	if len(in.Samples) == 0 || in.M.Perf.Clock != perfmem.ClockMono {
+		return
+	}
+
+	// Hit pages per quiet region, e.g. sample 0x31040 -> page 0x30000 (16 KiB pages).
+	hits := map[int][]uint64{}
+	for _, s := range in.Samples {
+		if s.Addr == 0 || s.TimeNS < res.Window.StartNS || s.TimeNS > res.Window.EndNS {
+			continue
+		}
+		i := res.Find(s.Addr)
+		if i < 0 || res.Regions[i].Label != Quiet {
+			continue
+		}
+		hits[i] = append(hits[i], s.Addr&^(page-1))
+	}
+	if len(hits) == 0 {
+		return
+	}
+
+	old := res.Regions
+	res.Regions = nil
+	for i, r := range old {
+		pages := hits[i]
+		if len(pages) == 0 {
+			res.Regions = append(res.Regions, r)
+			continue
+		}
+		slices.Sort(pages)
+
+		// Split around hit pages; addInterval merges adjacent pieces.
+		cur := r.Start
+		for _, p := range slices.Compact(pages) {
+			lo, hi := max(p, r.Start), min(p+page, r.End)
+			if lo > cur {
+				res.addInterval(cur, lo, Quiet, nil)
+			}
+			res.addInterval(lo, hi, Observed, []string{ReasonPerfHit})
+			cur = hi
+		}
+		if cur < r.End {
+			res.addInterval(cur, r.End, Quiet, nil)
 		}
 	}
 }
