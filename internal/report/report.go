@@ -1,0 +1,208 @@
+// Package report analyzes a recording offline.
+package report
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+
+	"github.com/google/pprof/profile"
+
+	"github.com/vrutkovs/golang-cold-memory/internal/analysis"
+	"github.com/vrutkovs/golang-cold-memory/internal/coredump"
+	"github.com/vrutkovs/golang-cold-memory/internal/objects"
+	"github.com/vrutkovs/golang-cold-memory/internal/perfmem"
+	"github.com/vrutkovs/golang-cold-memory/internal/proc"
+	"github.com/vrutkovs/golang-cold-memory/internal/store"
+)
+
+// Options configure a report.
+type Options struct {
+	analysis.Options
+	Objects    bool
+	MaxPaths   int
+	TopObjects int
+}
+
+// SampleMatch ties one in-window perf sample to a core-time object candidate.
+type SampleMatch struct {
+	analysis.SampleRef
+	Object      *objects.Obj `json:"object,omitempty"`
+	Offset      int64        `json:"offset,omitempty"`
+	Reason      string       `json:"reason,omitempty"`
+	CoreDelayNS int64        `json:"core_delay_ns,omitempty"`
+	Confidence  string       `json:"confidence"`
+}
+
+// PprofSite is one sampled allocation site from an optional heap profile.
+type PprofSite struct {
+	Function string `json:"function"`
+	Bytes    int64  `json:"inuse_bytes"`
+}
+
+// Report is the full offline result.
+type Report struct {
+	Dir          string                      `json:"dir"`
+	Status       string                      `json:"status"`
+	Errors       []string                    `json:"errors,omitempty"`
+	Target       proc.Identity               `json:"target"`
+	Binary       proc.Binary                 `json:"binary"`
+	Kernel       string                      `json:"kernel"`
+	PageSize     uint64                      `json:"page_size"`
+	Settings     store.Settings              `json:"settings"`
+	Capabilities map[string]store.Capability `json:"capabilities"`
+	*analysis.Result
+	DAMONSnapshots []store.DAMONSnapshot `json:"damon_snapshots"`
+	SampleMatches  []SampleMatch         `json:"sample_matches,omitempty"`
+	Objects        *objects.Result       `json:"objects,omitempty"`
+	ObjectsErr     string                `json:"objects_error,omitempty"`
+	CoreMissing    []proc.Range          `json:"core_missing_ranges,omitempty"`
+	CoreGapNS      int64                 `json:"core_after_final_snapshot_ns,omitempty"`
+	Pprof          []PprofSite           `json:"pprof_allocation_sites,omitempty"`
+	PprofErr       string                `json:"pprof_error,omitempty"`
+}
+
+// Build loads dir and analyzes it.
+func Build(dir string, o Options) (*Report, error) {
+	m, err := store.ReadManifest(dir)
+	if err != nil {
+		return nil, fmt.Errorf("not a gocold recording: %w", err)
+	}
+
+	in := analysis.Input{M: m}
+	var loadErrs []string
+	load := func(err error) {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			loadErrs = append(loadErrs, err.Error())
+		}
+	}
+	in.Maps, err = store.ReadJSONL[store.MapSnapshot](filepath.Join(dir, store.MapsFile))
+	load(err)
+	in.Residency, err = store.ReadJSONL[store.ResidencySnapshot](filepath.Join(dir, store.ResidencyFile))
+	load(err)
+	in.DAMON, err = store.ReadJSONL[store.DAMONSnapshot](filepath.Join(dir, store.DAMONFile))
+	load(err)
+	if m.Capabilities[store.CapPerf].Available {
+		in.Samples, err = perfmem.ReadSamples(filepath.Join(dir, store.PerfSamples))
+		load(err)
+	}
+
+	res := analysis.Run(in, o.Options)
+	r := &Report{
+		Dir: dir, Status: m.Status, Errors: append(m.Errors, loadErrs...),
+		Target: m.Target, Binary: m.Binary, Kernel: m.Host.Kernel, PageSize: m.Host.PageSize,
+		Settings: m.Settings, Capabilities: m.Capabilities, Result: res,
+		CoreMissing: m.Core.Missing, CoreGapNS: m.Core.SnapshotGapNS,
+	}
+	for _, s := range in.DAMON {
+		if s.T >= res.Window.StartNS && s.T <= res.Window.EndNS {
+			r.DAMONSnapshots = append(r.DAMONSnapshots, s)
+		}
+	}
+	if m.Status != store.StatusComplete {
+		r.Notes = append(r.Notes, "recording status "+m.Status+": evidence is partial")
+	}
+
+	if o.Objects && m.Capabilities[store.CapCore].Available {
+		r.objects(dir, m, o)
+	}
+	if m.Capabilities[store.CapPprof].Available {
+		r.pprof(filepath.Join(dir, store.PprofFile), o.Top)
+	}
+	return r, nil
+}
+
+func (r *Report) objects(dir string, m *store.Manifest, o Options) {
+	exe := filepath.Join(dir, coredump.ExeName)
+	sum, err := proc.HashFile(exe)
+	if err != nil {
+		r.ObjectsErr = err.Error()
+		return
+	}
+	if sum != m.Binary.SHA256 || sum != m.Core.ExeSHA256 {
+		r.ObjectsErr = "executable does not match recorded target binary; refusing binary/core pair"
+		return
+	}
+
+	p, err := objects.Load(filepath.Join(dir, m.Core.Path), exe)
+	if err != nil {
+		r.ObjectsErr = err.Error()
+		return
+	}
+	if p.BuildVersion() != m.Binary.GoVersion {
+		r.ObjectsErr = fmt.Sprintf("core runtime %s != binary %s; refusing mismatched pair", p.BuildVersion(), m.Binary.GoVersion)
+		return
+	}
+
+	addrs := make([]uint64, len(r.MatchSamples))
+	for i, s := range r.MatchSamples {
+		addrs[i] = s.Addr
+	}
+	res, err := objects.Analyze(p, r.Visit, r.Label, addrs, objects.Options{MaxPaths: o.MaxPaths, TopObjects: o.TopObjects})
+	if err != nil {
+		r.ObjectsErr = err.Error()
+		return
+	}
+	r.Objects = res
+
+	for i, mt := range res.Matches {
+		s := r.MatchSamples[i]
+		sm := SampleMatch{SampleRef: s, Object: mt.Object, Offset: mt.Offset, Reason: mt.Reason, Confidence: "none"}
+		if mt.Object != nil {
+			// Address reuse between sample and core cannot be excluded.
+			sm.Confidence = "core-time object candidate"
+			if r.PerfComparable && m.Core.StartNS > 0 {
+				sm.CoreDelayNS = m.Core.StartNS - s.TimeNS
+			}
+		}
+		r.SampleMatches = append(r.SampleMatches, sm)
+	}
+}
+
+// pprof summarizes sampled allocation sites; never joined to addresses.
+func (r *Report) pprof(path string, top int) {
+	f, err := os.Open(path)
+	if err != nil {
+		r.PprofErr = err.Error()
+		return
+	}
+	defer f.Close()
+	p, err := profile.Parse(f)
+	if err != nil {
+		r.PprofErr = err.Error()
+		return
+	}
+
+	idx := len(p.SampleType) - 1
+	for i, st := range p.SampleType {
+		if st.Type == "inuse_space" {
+			idx = i
+		}
+	}
+	sites := map[string]int64{}
+	for _, s := range p.Sample {
+		fn := "[unknown]"
+		if len(s.Location) > 0 && len(s.Location[0].Line) > 0 && s.Location[0].Line[0].Function != nil {
+			fn = s.Location[0].Line[0].Function.Name
+		}
+		sites[fn] += s.Value[idx]
+	}
+	for k, v := range sites {
+		r.Pprof = append(r.Pprof, PprofSite{k, v})
+	}
+	sort.Slice(r.Pprof, func(i, j int) bool { return r.Pprof[i].Bytes > r.Pprof[j].Bytes })
+	if len(r.Pprof) > top {
+		r.Pprof = r.Pprof[:top]
+	}
+}
+
+// JSON writes the full report.
+func (r *Report) JSON(w io.Writer) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(r)
+}

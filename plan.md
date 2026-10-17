@@ -1,0 +1,47 @@
+# Go process memory-access profiler
+
+## Goal
+
+Build a Linux CLI that measures access in a running Go process without changing application code. Report candidate memory regions first; with a nearby core dump, identify resident Go heap regions and match sampled addresses to allocations and reference paths. Output evidence and uncertainty, not claims that an object is dead or its exact last-access time.
+
+This tool measures access. Heap pprof measures sampled allocation sites and is optional context, not an access sensor. Keep allocation-site comparison out of scope; `pprof-mem-map` covers that separately.
+
+## CLI and prerequisites
+
+- `gocold probe --pid PID`: report Go version, binary identity and DWARF availability, target address mappings, DAMON sysfs support, available `perf mem` events, required permissions, and disk-space estimate. Accept a **host PID**; document `podman inspect CONTAINER --format '{{.State.Pid}}'` for containers. Refuse PID reuse by checking process start time throughout a run.
+- `gocold record --pid PID --duration 60s --out DIR [--objects]`: sample accesses, save time-stamped evidence, and optionally capture a core at the end. Use a private output directory. Never force garbage collection or change target configuration.
+- `gocold report DIR [--json]`: analyze saved data offline. Allow region-only reports when `perf` or core capture is unavailable. State missing capabilities in the report.
+- Require Linux and a supported Go runtime; verify Go build information and use the exact `/proc/PID/exe` image for core analysis. Record executable hash, Go version, PID, process start time, kernel, page size, tool versions, sampling settings, and clock metadata. Reject mismatched binary/core pairs.
+- DAMON sysfs configuration needs elevated host access. `perf` needs an available memory-sampling PMU and suitable perf permissions. Core capture needs ptrace permission and can briefly pause the process. `probe` must expose these requirements before `record` changes anything.
+
+## Collection flow
+
+1. Read `/proc/PID/maps` and `/proc/PID/smaps`; select bounded writable anonymous ranges as **candidates**, not as confirmed Go heap. Avoid DAMON's default `vaddr` range selection when it includes large unmapped gaps. Monitor explicit virtual-address ranges (`fvaddr`) with page-table sampling. Recheck mappings during the run; report newly mapped ranges as unobserved until monitoring covers them. Never silently count reserved, unmapped, file-backed, swapped, or uncommitted bytes as cold Go memory.
+2. Allocate a DAMON monitor only if safe. Do not stop, reconfigure, or claim ownership of an existing monitor. Record periodic raw-address snapshots with monotonic capture times, interval settings, region bounds, access counts/rates, and access-pattern ages. Clean up **only** the monitor created by this run, including on errors or interruption. Never configure DAMOS actions such as `pageout` or `cold`.
+3. Probe `perf mem record -e list`. On supported Intel PEBS, AMD IBS, or Arm SPE systems, attach memory-event sampling to the target PID. Choose events from the probe result, not a hard-coded Intel event. For `perf record`, request data addresses and weights (`-d -W`); verify recorded sample type includes `ADDR` and that useful addresses were captured. Save event configuration, sample time, virtual data address, instruction symbol, operation, weight/latency when present, and lost-sample counts. Loads can be latency-biased; stores may be unavailable. If unsupported, continue with DAMON and mark `perf` evidence absent.
+4. Take final DAMON snapshot **before** core capture, then capture a core and exact executable close together when `--objects` is set. Save snapshot/core time gap. Core capture can touch memory or pause the target, so exclude that period from access classification. Validate required Go heap metadata pages exist in the core; report missing mappings instead of guessing.
+5. Store a manifest plus raw DAMON snapshots and perf data. Capture optional heap pprof only if an existing endpoint is explicitly supplied. Do not assume every Go target exposes pprof.
+
+## Analysis and labels
+
+- Intersect every DAMON snapshot with current mappings and, when available, Go heap spans from the core. Track address coverage over time despite DAMON region split/merge. Use present-page information where permissions permit; otherwise distinguish mapped bytes from verified resident bytes and omit resident-byte totals. Do not equate a quiet virtual range with RAM usage.
+- **Observed-access region:** DAMON reports access during the selected window. Show rate and covered interval. **Frequently accessed region:** rate exceeds a user-selected threshold for a stated share of the window. **Quiet candidate:** monitored throughout the chosen window, confirmed resident, with no DAMON access observed. Any gap, mapping change, mixed region, or unknown residency makes the affected address interval **unknown**. `age` describes persistence of an access pattern, not last access. Derive `latest observed access` only from saved positive snapshots or timestamped perf samples, with sampling resolution attached.
+- Overlay perf samples on address ranges. Show sample counts and code locations separately from DAMON rates. A perf hit establishes a sampled access at that address and time; absence of hits is not evidence of no access. Do not convert sample weights into exact byte counts or exact per-object access frequency.
+- With `--objects`, map core-time Go heap spans to object boundaries, sizes, types, and reference paths. Use a maintained `golang.org/x/debug`/`viewcore`-based analyzer with structured output; its `internal/gocore` package cannot be imported directly by this module. Support Go's on-demand GC masks: when `TFlagGCMaskOnDemand` is set, dereference `GCData` once to reach the bitmap. If its slot is nil or metadata is missing, mark affected pointer graph incomplete; never scan the pointer slot as bitmap or invent missing edges.
+- Associate each perf address with a **core-time object candidate** only if it falls inside a recognized object. Report sample time, object address/offset, type or `unknown`, and path. Address reuse between sample and core prevents proof that the same object was accessed. For quiet-object candidates, require the **entire object** to fit continuously covered quiet, resident regions; otherwise report `mixed` or `unknown`. Large preallocated slices with `len=0` remain allocated spare capacity, not dead memory.
+- Group by type and owner path only when attribution works. Keep unnamed `unk<size>` objects and missing paths visible. If pprof exists, show its sampled allocation sites in a separate section; never join a pprof site to an address without independent evidence.
+
+## Output and safety
+
+- Print covered resident bytes, observed-access bytes, quiet-candidate bytes, unknown bytes, sample counts, and top code paths. Include exact address ranges and observation window. JSON must preserve per-region snapshots, sample-to-object candidate matches, confidence flags, and reasons for exclusions. Do not add totals for overlapping regions or count core-time objects as stable throughout the window.
+- Core dumps and profiles may contain secrets. Create output directory mode `0700` and files mode `0600`, check free space before capture, and never upload artifacts. Do not auto-delete pre-existing files or overwrite an existing core. Make core capture opt-in and document cleanup.
+- Bound snapshot count, monitored regions, perf sampling rate, memory, and disk use. Fail safely if the target exits, PID changes, monitor ownership changes, or data collection becomes incomplete. Restore only settings changed by this run.
+
+## Delivery steps and tests
+
+1. **Region-only MVP:** `probe`, DAMON collection, mapping/residency checks, coverage-aware report, and JSON. Test split/merged regions, mapping growth, unmapped gaps, PID reuse, permissions, interruption, and cleanup without touching other monitors.
+2. **Perf overlay:** capability probe, PID-scoped collection, ADDR verification, event timestamps, lost samples, and instruction symbols. Test unsupported PMUs and recordings that contain samples but no `ADDR` field. Compare samples to DAMON regions without treating absent samples as cold.
+3. **Go object mapping:** opt-in core capture and structured analyzer with exact-binary checks. Regression-test the Go 1.27.2 core where unpatched `viewcore` panics at `0x37d1000`; verify on-demand bitmap dereference, nil-mask diagnostics, and named/unknown objects. Test object boundaries, slices crossing quiet/hot regions, address reuse warnings, and missing core pages.
+4. **End-to-end fixture:** start a small Go process with known hot reads and large idle preallocated slices, without instrumentation in the profiler. Run collector under representative traffic. Verify hot samples map to expected code and core-time objects; idle allocations are reported as candidates only when covered. Run on Intel with memory samples and on arm64 or another host without `perf mem`. Store small sanitized fixtures for offline tests, not production cores.
+
+Initial validation case: VictoriaMetrics v1.154.0 on Intel i7-8650U. A 64 KiB workingset cache allocation had 99 sampled loads, while eight `storage.rawRowsShard.rows` buffers held 8 MiB each with zero slice length at core time. Some buffers lay outside DAMON coverage; this case must report that gap instead of labeling all 64 MiB cold.
