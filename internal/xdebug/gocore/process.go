@@ -79,6 +79,7 @@ type Process struct {
 	// Incomplete-graph diagnostics (gocold patch).
 	diagnostics []string
 	diagSeen    map[core.Address]bool
+	allocTypes  map[core.Address]allocType // object base -> malloc-header type
 }
 
 type reverseEdge struct {
@@ -521,6 +522,7 @@ func readHeap0(p *Process, mheap region, arenas []arena, arenaBaseOffset int64) 
 					if typeAddr == 0 {
 						continue
 					}
+					p.noteAllocType(min.Add(off), typeAddr, mallocHeaderSize)
 					typ := region{p: p.proc, a: typeAddr, typ: abiType}
 					nptrs := int64(typ.Field("PtrBytes").Uintptr()) / int64(heap.ptrSize)
 					kindGCProg, hasGCProgs := p.rtConsts.find("internal/abi.KindGCProg")
@@ -549,6 +551,7 @@ func readHeap0(p *Process, mheap region, arenas []arena, arenaBaseOffset int64) 
 				// actively allocating a large object.
 				typPtr := s.Field("largeType")
 				if typPtr.Address() != 0 {
+					p.noteAllocType(min, typPtr.Address(), 0)
 					typ := typPtr.Deref()
 					nptrs := int64(typ.Field("PtrBytes").Uintptr()) / int64(heap.ptrSize)
 					kindGCProg, hasGCProgs := p.rtConsts.find("internal/abi.KindGCProg")

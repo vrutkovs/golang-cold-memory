@@ -88,3 +88,28 @@ func goMinor(v string) int {
 	n, _ := strconv.Atoi(v)
 	return n
 }
+
+type allocType struct {
+	typ core.Address
+	hdr int64 // header bytes before the data (0 for large objects)
+}
+
+// noteAllocType records the abi.Type from an object's malloc header
+// (Go 1.22+: pointerful objects > 512 B) or span.largeType.
+func (p *Process) noteAllocType(obj, typ core.Address, hdr int64) {
+	if p.allocTypes == nil {
+		p.allocTypes = map[core.Address]allocType{}
+	}
+	p.allocTypes[obj] = allocType{typ, hdr}
+}
+
+// AllocType returns the element type the runtime recorded at allocation
+// for x and the header size preceding the data. It describes the
+// allocation, not necessarily how the program uses the memory now.
+func (p *Process) AllocType(x Object) (*Type, int64) {
+	a, ok := p.allocTypes[core.Address(x)]
+	if !ok || !p.proc.ReadableN(a.typ, p.findRuntimeType(a.typ).reg.typ.Size) {
+		return nil, 0
+	}
+	return p.runtimeType2Type(a.typ, 0), a.hdr
+}

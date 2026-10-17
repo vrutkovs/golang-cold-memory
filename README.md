@@ -43,11 +43,13 @@ A perf hit inside the window changes its page from `quiet-candidate` to `observe
 
 `report` prints a glyph heatmap (address bins × time; `-` unmonitored, `.` no access observed, `1`–`7` rate levels) and writes it to JSON (`heatmap`). `--html FILE` writes a self-contained HTML page (new file, mode 0600):
 
-- **Address rows:** monitored space binned to `--heatmap-rows`. Each never-monitored range is one collapsed, hatched row.
+- **Address rows** (text and JSON only): monitored space binned to `--heatmap-rows`. Each never-monitored range is one collapsed row.
 - **Columns:** DAMON snapshots, grouped to fit `--heatmap-cols`. Red borders mark time gaps.
 - **Cells:** byte-weighted DAMON access rate on a discrete legend. A dashed outline means partly monitored; a blue dot means perf samples. Hover a cell for the numbers.
-- **Type rows** (with a core): the largest `--heatmap-types` core-time types. Their placement is projected over the whole window, so earlier cells may describe other objects.
+- **Type rows** (with a core; the only HTML table): the largest `--heatmap-types` core-time types. Their placement is projected over the whole window, so earlier cells may describe other objects.
 - Rows sort by address, mean or max rate, perf hits, or size. Names are HTML-escaped.
+
+Objects the analyzer can't type from roots fall back to the type in their malloc header (Go 1.22+, pointerful objects > 512 B, and large objects), shown as `alloc:T` or `alloc:[n]T`. This is the allocated type, not necessarily current use. Small objects and pointer-free objects have no header and stay `unk<size>`.
 
 ## Safety
 

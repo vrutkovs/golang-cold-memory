@@ -13,7 +13,7 @@ func typeName(c *gocore.Process, x gocore.Object) string {
 	size := c.Size(x)
 	typ, repeat := c.Type(x)
 	if typ == nil {
-		return fmt.Sprintf("unk%d", size)
+		return allocName(c, x, size)
 	}
 	name := typ.String()
 	n := size / typ.Size
@@ -90,4 +90,21 @@ func typeFieldName(t *gocore.Type, off int64) string {
 		}
 	}
 	return ".???"
+}
+
+// allocName names an untyped object from its malloc-header type, e.g.
+// "alloc:[8]sync.poolLocal"; falls back to unk<size>. Header metadata
+// that can't be decoded must not abort the whole analysis.
+func allocName(c *gocore.Process, x gocore.Object, size int64) (name string) {
+	name = fmt.Sprintf("unk%d", size)
+	defer func() { _ = recover() }()
+
+	t, hdr := c.AllocType(x)
+	if t == nil || t.Size <= 0 {
+		return name
+	}
+	if n := (size - hdr) / t.Size; n > 1 {
+		return fmt.Sprintf("alloc:[%d]%s", n, t)
+	}
+	return "alloc:" + t.String()
 }
