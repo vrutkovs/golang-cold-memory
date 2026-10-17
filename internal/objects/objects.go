@@ -29,8 +29,12 @@ type Options struct {
 	MaxPaths   int // reference paths computed in total
 	TopObjects int // quiet/mixed objects listed
 
-	// Each, when set, receives every object's type name and address range.
-	Each func(name string, start, end uint64)
+	// Sites resolves allocation sites of memprofile-sampled objects (optional).
+	Sites *Sites
+
+	// Each, when set, receives every object's type name, allocation site
+	// (NoSite when unsampled) and address range.
+	Each func(name, site string, start, end uint64)
 }
 
 // Group aggregates objects by type or owner.
@@ -49,6 +53,8 @@ type Obj struct {
 	Label    string   `json:"label"`
 	Path     []string `json:"path,omitempty"`
 	Owner    string   `json:"owner,omitempty"`
+	Site     string   `json:"alloc_site,omitempty"`
+	Stack    []string `json:"alloc_stack,omitempty"`
 	SliceLen *int64   `json:"slice_len,omitempty"`
 	SliceCap *int64   `json:"slice_cap,omitempty"`
 	Notes    []string `json:"notes,omitempty"`
@@ -68,6 +74,10 @@ type Result struct {
 	Objects      int      `json:"objects"`
 	Bytes        int64    `json:"bytes"`
 	ByType       []Group  `json:"by_type"`
+	BySite       []Group  `json:"by_type_and_site"`
+	Sampled      int      `json:"sampled_objects"`
+	SampledBytes int64    `json:"sampled_bytes"`
+	ProfileRate  int64    `json:"mem_profile_rate"`
 	ByOwner      []Group  `json:"by_owner"`
 	Listed       []Obj    `json:"listed_objects"`
 	Matches      []Match  `json:"sample_matches"`
@@ -92,7 +102,7 @@ func Analyze(p *gocore.Process, visit, label Classifier, addrs []uint64, o Optio
 	defer recoverErr(&err)
 	res = &Result{GoVersion: p.BuildVersion(), Warnings: p.Process().Warnings()}
 
-	byType := map[string]*Group{}
+	byType, bySite := map[string]*Group{}, map[string]*Group{}
 	var notable []gocore.Object
 	labels := map[gocore.Object]string{}
 	p.ForEachObject(func(x gocore.Object) bool {
@@ -102,8 +112,19 @@ func Analyze(p *gocore.Process, visit, label Classifier, addrs []uint64, o Optio
 		res.Objects++
 		res.Bytes += sz
 		addTo(byType, name, sz, l)
+
+		// Same type from different call sites, e.g. "[]byte ← pkg.f (dir/f.go:12)".
+		site := NoSite
+		if o.Sites != nil {
+			site, _ = o.Sites.Of(x)
+		}
+		if site != NoSite {
+			res.Sampled++
+			res.SampledBytes += sz
+		}
+		addTo(bySite, SiteKey(name, site), sz, l)
 		if o.Each != nil {
-			o.Each(name, a, a+uint64(sz))
+			o.Each(name, site, a, a+uint64(sz))
 		}
 		if l == LabelQuiet || l == LabelMixed {
 			notable = append(notable, x)
@@ -112,6 +133,8 @@ func Analyze(p *gocore.Process, visit, label Classifier, addrs []uint64, o Optio
 		return true
 	})
 	res.ByType = sorted(byType)
+	res.BySite = sorted(bySite)
+	res.ProfileRate = p.MemProfileRate()
 
 	sort.Slice(notable, func(i, j int) bool { return p.Size(notable[i]) > p.Size(notable[j]) })
 	if len(notable) > o.TopObjects {
@@ -121,7 +144,7 @@ func Analyze(p *gocore.Process, visit, label Classifier, addrs []uint64, o Optio
 	budget := o.MaxPaths
 	byOwner := map[string]*Group{}
 	for _, x := range notable {
-		obj := describe(p, x, labels[x], &budget)
+		obj := describe(p, x, labels[x], &budget, o.Sites)
 		res.Listed = append(res.Listed, obj)
 		addTo(byOwner, ownerKey(obj), obj.Size, obj.Label)
 	}
@@ -137,7 +160,7 @@ func Analyze(p *gocore.Process, visit, label Classifier, addrs []uint64, o Optio
 		obj, ok := seen[x]
 		if !ok {
 			ax := uint64(p.Addr(x))
-			d := describe(p, x, label(ax, ax+uint64(p.Size(x))), &budget)
+			d := describe(p, x, label(ax, ax+uint64(p.Size(x))), &budget, o.Sites)
 			obj = &d
 			seen[x] = obj
 		}
@@ -150,8 +173,13 @@ func Analyze(p *gocore.Process, visit, label Classifier, addrs []uint64, o Optio
 }
 
 // describe builds Obj, spending one path from budget when available.
-func describe(p *gocore.Process, x gocore.Object, label string, budget *int) Obj {
+func describe(p *gocore.Process, x gocore.Object, label string, budget *int, sites *Sites) Obj {
 	o := Obj{Addr: uint64(p.Addr(x)), Size: p.Size(x), Type: typeName(p, x), Label: label}
+	if sites != nil {
+		if site, stack := sites.Of(x); site != NoSite {
+			o.Site, o.Stack = site, stack
+		}
+	}
 	if *budget <= 0 {
 		o.Notes = append(o.Notes, "path not computed (--max-paths budget)")
 		return o
@@ -295,3 +323,6 @@ func recoverErr(err *error) {
 		*err = fmt.Errorf("core analysis failed: %v", r)
 	}
 }
+
+// SiteKey joins a type and allocation site into one group key.
+func SiteKey(typ, site string) string { return typ + " ← " + site }

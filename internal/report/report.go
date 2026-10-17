@@ -73,6 +73,18 @@ type Report struct {
 
 	textMap *heatmap.Heatmap
 	types   map[string][]proc.Range // core-time object ranges by type
+	sites   map[string][]proc.Range // sampled object ranges by type ← site
+}
+
+// addRange appends [start, end) to m[key], merging adjacent objects (e.g. one span).
+func addRange(m map[string][]proc.Range, key string, start, end uint64) {
+	rs := m[key]
+	if n := len(rs); n > 0 && rs[n-1].End == start {
+		rs[n-1].End = end
+	} else {
+		rs = append(rs, proc.Range{Start: start, End: end})
+	}
+	m[key] = rs
 }
 
 // Build loads dir and analyzes it.
@@ -123,7 +135,7 @@ func Build(dir string, o Options) (*Report, error) {
 		r.pprof(filepath.Join(dir, store.PprofFile), o.Top)
 	}
 
-	hm := heatmap.Input{In: in, Res: res, Snaps: r.DAMONSnapshots, Types: r.types, Option: o.Heatmap}
+	hm := heatmap.Input{In: in, Res: res, Snaps: r.DAMONSnapshots, Types: r.types, Sites: r.sites, Option: o.Heatmap}
 	r.Heatmap = heatmap.Build(hm)
 	hm.Option = textHeatmap
 	r.textMap = heatmap.Build(hm)
@@ -156,17 +168,15 @@ func (r *Report) objects(dir string, m *store.Manifest, o Options) {
 	for i, s := range r.MatchSamples {
 		addrs[i] = s.Addr
 	}
-	r.types = map[string][]proc.Range{}
-	each := func(name string, start, end uint64) {
-		rs := r.types[name]
-		if n := len(rs); n > 0 && rs[n-1].End == start {
-			rs[n-1].End = end // adjacent objects of one type, e.g. a span
-		} else {
-			rs = append(rs, proc.Range{Start: start, End: end})
+	r.types, r.sites = map[string][]proc.Range{}, map[string][]proc.Range{}
+	each := func(name, site string, start, end uint64) {
+		addRange(r.types, name, start, end)
+		if site != objects.NoSite {
+			addRange(r.sites, objects.SiteKey(name, site), start, end)
 		}
-		r.types[name] = rs
 	}
-	res, err := objects.Analyze(p, r.Visit, r.Label, addrs, objects.Options{MaxPaths: o.MaxPaths, TopObjects: o.TopObjects, Each: each})
+	res, err := objects.Analyze(p, r.Visit, r.Label, addrs, objects.Options{
+		MaxPaths: o.MaxPaths, TopObjects: o.TopObjects, Sites: objects.NewSites(p), Each: each})
 	if err != nil {
 		r.ObjectsErr = err.Error()
 		return

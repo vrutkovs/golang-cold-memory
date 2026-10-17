@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vrutkovs/golang-cold-memory/internal/analysis"
+	"github.com/vrutkovs/golang-cold-memory/internal/objects"
 	"github.com/vrutkovs/golang-cold-memory/internal/store"
 )
 
@@ -134,6 +135,7 @@ func (r *Report) textObjects(p func(string, ...any), top int) {
 		}
 		p("    %10s %7d  %-40s %s", human(uint64(g.Bytes)), g.Count, g.Key, labels(g.Labels))
 	}
+	r.textSites(p, top)
 	if len(o.ByOwner) > 0 {
 		p("  quiet/mixed by owner (listed objects only)")
 		for i, g := range o.ByOwner {
@@ -166,6 +168,39 @@ func (r *Report) textObjects(p func(string, ...any), top int) {
 		}
 	}
 	p("  perf samples inside core-time objects: %d of %d (address reuse possible)", matched, len(r.SampleMatches))
+}
+
+// textSites lists sampled allocation sites, least-used first: rows with
+// quiet bytes are candidates for allocations that are no longer used.
+func (r *Report) textSites(p func(string, ...any), top int) {
+	o := r.Objects
+	rate := "unknown"
+	if o.ProfileRate >= 0 {
+		rate = fmt.Sprint(o.ProfileRate)
+	}
+	p("  by type and allocation site (memprofile-sampled: %d of %d objects, %s of %s; MemProfileRate=%s)",
+		o.Sampled, o.Objects, human(uint64(o.SampledBytes)), human(uint64(o.Bytes)), rate)
+	if o.Sampled == 0 {
+		p("    no sampled objects. MemProfileRate=0 means the binary never links runtime.MemProfile (e.g. no net/http/pprof import);")
+		p("    otherwise restart the target with GODEBUG=memprofilerate=N (lower N = more coverage, more overhead)")
+		return
+	}
+
+	var rows []objects.Group
+	for _, g := range o.BySite {
+		if !strings.HasSuffix(g.Key, objects.NoSite) {
+			rows = append(rows, g)
+		}
+	}
+	idle := func(g objects.Group) int64 { return g.Labels[objects.LabelQuiet]*2 + g.Labels[objects.LabelMixed] }
+	sort.SliceStable(rows, func(i, j int) bool { return idle(rows[i]) > idle(rows[j]) })
+	for i, g := range rows {
+		if i == top {
+			break
+		}
+		p("    %10s %5d  %s", human(uint64(g.Bytes)), g.Count, labels(g.Labels))
+		p("               %s", g.Key)
+	}
 }
 
 func labels(m map[string]int64) string {

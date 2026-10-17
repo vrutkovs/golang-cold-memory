@@ -123,3 +123,58 @@ func TestOnDemandMaskNil(t *testing.T) {
 		t.Errorf("big object match = %+v", m)
 	}
 }
+
+func TestAllocSites(t *testing.T) {
+	if _, err := exec.LookPath("gcore"); err != nil {
+		t.Skip("gcore not installed")
+	}
+	f := testutil.StartFixture(t, []string{"GODEBUG=memprofilerate=1"})
+	dir := t.TempDir()
+	pid := f.Cmd.Process.Pid
+	if _, err := coredump.CopyExe(dir, pid); err != nil {
+		t.Fatal(err)
+	}
+	core, log, err := coredump.Capture(context.Background(), dir, pid)
+	if err != nil {
+		t.Skipf("gcore failed: %v\n%s", err, log)
+	}
+	exe := filepath.Join(dir, coredump.ExeName)
+	p, err := objects.Load(core, exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	quiet := func(uint64, uint64) string { return objects.LabelQuiet }
+	res, err := objects.Analyze(p, quiet, quiet, nil, objects.Options{MaxPaths: 20, TopObjects: 20, Sites: objects.NewSites(p)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ProfileRate != 1 || res.Sampled == 0 {
+		t.Fatalf("rate=%d sampled=%d", res.ProfileRate, res.Sampled)
+	}
+
+	counts := map[string]int{}
+	for _, g := range res.BySite {
+		if strings.HasPrefix(g.Key, "[8388608]uint8 ← ") {
+			counts[strings.TrimPrefix(g.Key, "[8388608]uint8 ← ")] = g.Count
+		}
+	}
+	var a, b int
+	for site, n := range counts {
+		switch {
+		case strings.HasPrefix(site, "main.idleA (fixture/main.go:"):
+			a = n
+		case strings.HasPrefix(site, "main.idleB (fixture/main.go:"):
+			b = n
+		}
+	}
+	if a != len(f.Idle)/2 || b != len(f.Idle)/2 {
+		t.Errorf("idle sites = %v", counts)
+	}
+
+	for _, o := range res.Listed {
+		if strings.HasPrefix(o.Type, "[8388608]") && (o.Site == "" || len(o.Stack) == 0) {
+			t.Errorf("listed idle %#x lacks site", o.Addr)
+		}
+	}
+}

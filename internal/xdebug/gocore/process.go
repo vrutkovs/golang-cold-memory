@@ -79,7 +79,8 @@ type Process struct {
 	// Incomplete-graph diagnostics (gocold patch).
 	diagnostics []string
 	diagSeen    map[core.Address]bool
-	allocTypes  map[core.Address]allocType // object base -> malloc-header type
+	allocTypes  map[core.Address]allocType    // object base -> malloc-header type
+	profiles    map[core.Address]core.Address // object base -> runtime.specialprofile
 }
 
 type reverseEdge struct {
@@ -454,10 +455,6 @@ func readHeap0(p *Process, mheap region, arenas []arena, arenaBaseOffset int64) 
 			// Process special records.
 			for sp := s.Field("specials"); sp.Address() != 0; sp = sp.Field("next") {
 				sp = sp.Deref() // *special to special
-				if sp.Field("kind").Uint8() != uint8(p.rtConsts.get("runtime._KindSpecialFinalizer")) {
-					// All other specials (just profile records) can't point into the heap.
-					continue
-				}
 				offField := sp.Field("offset")
 				var off int64
 				if offField.typ.Size == p.proc.PtrSize() {
@@ -466,6 +463,15 @@ func readHeap0(p *Process, mheap region, arenas []arena, arenaBaseOffset int64) 
 				} else {
 					// Go 1.23 and below.
 					off = int64(offField.Uint16())
+				}
+				kind := sp.Field("kind").Uint8()
+				if v, ok := p.rtConsts.find("runtime._KindSpecialProfile"); ok && kind == uint8(v) {
+					p.noteProfile(min.Add(off), sp.a)
+					continue
+				}
+				if kind != uint8(p.rtConsts.get("runtime._KindSpecialFinalizer")) {
+					// All other specials can't point into the heap.
+					continue
 				}
 				obj := min.Add(off)
 				typ := p.rtTypeByName["runtime.specialfinalizer"]

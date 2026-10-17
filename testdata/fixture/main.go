@@ -33,13 +33,18 @@ func main() {
 	gc := flag.Bool("gc", true, "run GC before ready (builds on-demand masks)")
 	flag.Parse()
 
+	// Referencing MemProfile keeps heap profiling enabled; otherwise the
+	// linker sets MemProfileRate=0 and no allocation sites are recorded.
+	runtime.MemProfile(nil, false)
+
 	hot = make([]byte, hotSize)
-	for range idleBufs {
-		b := make([]byte, idleSize)
-		for i := 0; i < len(b); i += pageStep {
-			b[i] = 1 // make resident
+	// Two allocation sites for one type, so reports can tell them apart.
+	for i := range idleBufs {
+		if i < idleBufs/2 {
+			idle = append(idle, idleA())
+		} else {
+			idle = append(idle, idleB())
 		}
-		idle = append(idle, b[:0])
 	}
 	big = new(bigPtrs)
 	big.p[0] = new(int)
@@ -61,4 +66,18 @@ func main() {
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+//go:noinline
+func idleA() []byte { return resident(make([]byte, idleSize)) }
+
+//go:noinline
+func idleB() []byte { return resident(make([]byte, idleSize)) }
+
+// resident touches every page and returns the slice with len 0.
+func resident(b []byte) []byte {
+	for i := 0; i < len(b); i += pageStep {
+		b[i] = 1
+	}
+	return b[:0]
 }

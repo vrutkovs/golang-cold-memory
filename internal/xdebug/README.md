@@ -13,6 +13,7 @@ Local patches:
   the slot is never scanned as a bitmap. Unpatched viewcore reads past the slot
   and panics on unmapped memory (e.g. Go 1.27.2 core at `0x37d1000`).
 - `gocore/process.go` + `gcmask.go`: record malloc-header / `span.largeType` types per object; `AllocType` exposes them for naming untyped objects.
+- `gocore/allocsite.go` + specials loop in `process.go`: record `_KindSpecialProfile` specials; `AllocStack` reads the bucket stack, `MemProfileRate` reads the runtime variable.
 - `gocore/process.go`: backtrace warnings go to `Diagnostics()` instead of stdout.
 
 To update: re-copy, rewrite import paths to this module, re-apply the patches,
