@@ -118,6 +118,22 @@ func TestTickLabelsAboveAdjacentHeaders(t *testing.T) {
 	}
 }
 
+func TestLongNamesScrollWithinCells(t *testing.T) {
+	h := &Heatmap{SiteRows: []Row{{Key: "<type> ← pkg.veryLongAllocationSite"}}}
+	m := Meta{QuietRegions: []QuietRegionView{{Address: "0x1000–0x2000", Sites: []QuietSiteView{{Key: "<type> ← pkg.veryLongAllocationSite"}}}}, HasCore: true}
+	var out bytes.Buffer
+	if err := h.HTML(&out, m); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if strings.Contains(s, "text-overflow:ellipsis") || !strings.Contains(s, "td.n bdi{display:block;max-width:26em;overflow-x:auto") {
+		t.Fatal("type and site must scroll within each cell rather than truncate")
+	}
+	if strings.Count(s, `<bdi tabindex="0">`) != 5 || !strings.Contains(s, "&lt;type&gt;") {
+		t.Fatal("scrollable type and site must be keyboard-focusable and escaped")
+	}
+}
+
 func TestColumnGroupingAndGaps(t *testing.T) {
 	x := input(t)
 	x.Snaps[3].T = 6 * sec // gap 3s..5s

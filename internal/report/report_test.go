@@ -174,6 +174,57 @@ func TestQuietRegionOverlapOnly(t *testing.T) {
 	}
 }
 
+func TestQuietTotalsExcludeUnattributedMemory(t *testing.T) {
+	r := &Report{Result: &analysis.Result{
+		Totals: analysis.Totals{MappedBytes: 0x3000, QuietBytes: 0x3000},
+		Regions: []analysis.Region{
+			{Start: 0x1000, End: 0x2000, Label: analysis.Quiet},
+			{Start: 0x2000, End: 0x3000, Label: analysis.Quiet, ObjectBytes: 0x400},
+			{Start: 0x3000, End: 0x4000, Label: analysis.Quiet, ObjectBytes: 0x1000},
+		},
+	}, Heatmap: &heatmap.Heatmap{}, Objects: &objects.Result{}}
+	r.textMap = &heatmap.Heatmap{}
+	r.limitQuietToObjects()
+	if r.Totals.QuietBytes != 0x1400 || r.Totals.UnknownBytes != 0x1c00 || r.Regions[0].Label != analysis.Unknown || r.Regions[1].Label != analysis.Quiet {
+		t.Fatalf("unattributed memory counted as quiet: totals=%+v regions=%+v", r.Totals, r.Regions)
+	}
+	path := filepath.Join(t.TempDir(), "heatmap.html")
+	if err := r.WriteHTML(path); err != nil {
+		t.Fatal(err)
+	}
+	html, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(html), "0x1000–0x2000") || !strings.Contains(string(html), "5.0 KiB") {
+		t.Fatalf("unattributed memory appears in quiet HTML: %s", html)
+	}
+	if !strings.Contains(string(html), "7.0 KiB excluded") {
+		t.Fatal("HTML does not explain excluded quiet bytes")
+	}
+	var out bytes.Buffer
+	r.Text(&out, 10)
+	if !strings.Contains(out.String(), "7.0 KiB excluded") {
+		t.Fatal("text report does not explain excluded quiet bytes")
+	}
+	var encoded bytes.Buffer
+	if err := r.JSON(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(encoded.String(), `"unattributed_quiet_bytes": 7168`) || !strings.Contains(encoded.String(), `"quiet_candidate_bytes": 5120`) {
+		t.Fatalf("JSON counts excluded memory as quiet: %s", encoded.String())
+	}
+}
+
+func TestQuietWithoutCoreIsUnverified(t *testing.T) {
+	r := &Report{Result: &analysis.Result{Totals: analysis.Totals{MappedBytes: 0x1000, QuietBytes: 0x1000},
+		Regions: []analysis.Region{{Start: 0x1000, End: 0x2000, Label: analysis.Quiet}}}}
+	r.limitQuietToObjects()
+	if r.Totals.QuietBytes != 0 || r.Regions[0].Label != analysis.Unknown {
+		t.Fatalf("missing core cannot confirm Go object: %+v", r.Totals)
+	}
+}
+
 // writeRecording builds a recording from the live fixture with synthetic
 // DAMON snapshots (hot buffer accessed, rest idle) and a real core.
 func writeRecording(t *testing.T) (string, *testutil.Fixture) {

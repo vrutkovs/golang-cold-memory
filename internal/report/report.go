@@ -61,15 +61,16 @@ type Report struct {
 	Settings     store.Settings              `json:"settings"`
 	Capabilities map[string]store.Capability `json:"capabilities"`
 	*analysis.Result
-	DAMONSnapshots []store.DAMONSnapshot `json:"damon_snapshots"`
-	SampleMatches  []SampleMatch         `json:"sample_matches,omitempty"`
-	Objects        *objects.Result       `json:"objects,omitempty"`
-	ObjectsErr     string                `json:"objects_error,omitempty"`
-	CoreMissing    []proc.Range          `json:"core_missing_ranges,omitempty"`
-	CoreGapNS      int64                 `json:"core_after_final_snapshot_ns,omitempty"`
-	Pprof          []PprofSite           `json:"pprof_allocation_sites,omitempty"`
-	PprofErr       string                `json:"pprof_error,omitempty"`
-	Heatmap        *heatmap.Heatmap      `json:"heatmap"`
+	DAMONSnapshots         []store.DAMONSnapshot `json:"damon_snapshots"`
+	SampleMatches          []SampleMatch         `json:"sample_matches,omitempty"`
+	Objects                *objects.Result       `json:"objects,omitempty"`
+	ObjectsErr             string                `json:"objects_error,omitempty"`
+	UnattributedQuietBytes uint64                `json:"unattributed_quiet_bytes,omitempty"`
+	CoreMissing            []proc.Range          `json:"core_missing_ranges,omitempty"`
+	CoreGapNS              int64                 `json:"core_after_final_snapshot_ns,omitempty"`
+	Pprof                  []PprofSite           `json:"pprof_allocation_sites,omitempty"`
+	PprofErr               string                `json:"pprof_error,omitempty"`
+	Heatmap                *heatmap.Heatmap      `json:"heatmap"`
 
 	textMap    *heatmap.Heatmap
 	sites      map[string][]proc.Range      // sampled object ranges by type ← site
@@ -131,6 +132,7 @@ func Build(dir string, o Options) (*Report, error) {
 	if o.Objects && m.Capabilities[store.CapCore].Available {
 		r.objects(dir, m, o)
 	}
+	r.limitQuietToObjects()
 	if m.Capabilities[store.CapPprof].Available {
 		r.pprof(filepath.Join(dir, store.PprofFile), o.Top)
 	}
@@ -140,6 +142,31 @@ func Build(dir string, o Options) (*Report, error) {
 	hm.Option = textHeatmap
 	r.textMap = heatmap.Build(hm)
 	return r, nil
+}
+
+// limitQuietToObjects counts only bytes occupied by reachable Go objects at core time.
+func (r *Report) limitQuietToObjects() {
+	for i := range r.Regions {
+		region := &r.Regions[i]
+		if region.Label != analysis.Quiet {
+			continue
+		}
+		objectBytes := uint64(0)
+		if r.Objects != nil {
+			objectBytes = uint64(region.ObjectBytes)
+		}
+		unattributed := region.Size() - objectBytes
+		r.UnattributedQuietBytes += unattributed
+		if objectBytes == 0 {
+			region.Label = analysis.Unknown
+			region.Reasons = append(region.Reasons, "no reachable Go object confirmed in final core")
+		}
+	}
+	r.Totals.QuietBytes -= r.UnattributedQuietBytes
+	r.Totals.UnknownBytes += r.UnattributedQuietBytes
+	if r.UnattributedQuietBytes > 0 {
+		r.Notes = append(r.Notes, "quiet total counts only core-time reachable Go object bytes; unattributed memory excluded (could be freed or untracked)")
+	}
 }
 
 func (r *Report) objects(dir string, m *store.Manifest, o Options) {
@@ -255,9 +282,12 @@ func (r *Report) pprof(path string, top int) {
 func (r *Report) WriteHTML(path string) error {
 	m := heatmap.Meta{Dir: r.Dir, PID: r.Target.PID, GoVersion: r.Binary.GoVersion,
 		Kernel: r.Kernel, QuietBytes: human(r.Totals.QuietBytes)}
+	if r.UnattributedQuietBytes > 0 {
+		m.QuietExcluded = human(r.UnattributedQuietBytes)
+	}
 	var quietRegions []analysis.Region
 	for _, region := range r.Regions {
-		if region.Label == analysis.Quiet {
+		if r.Objects != nil && region.Label == analysis.Quiet && region.ObjectBytes > 0 {
 			quietRegions = append(quietRegions, region)
 		}
 	}

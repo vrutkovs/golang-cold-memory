@@ -55,6 +55,9 @@ func (r *Report) Text(w io.Writer, top int) {
 	}
 	p("  observed access     %s (frequently accessed %s)", human(t.ObservedBytes), human(t.FrequentBytes))
 	p("  quiet candidate     %s", human(t.QuietBytes))
+	if r.UnattributedQuietBytes > 0 {
+		p("  core-unattributed   %s excluded from quiet total", human(r.UnattributedQuietBytes))
+	}
 	p("  unknown             %s", human(t.UnknownBytes))
 	p("  perf samples        %d in window, %d outside candidates, %d lost", t.PerfSamples, t.PerfOutside, t.PerfLost)
 	for _, e := range t.PerfExcluded {

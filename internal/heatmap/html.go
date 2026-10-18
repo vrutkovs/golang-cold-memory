@@ -13,14 +13,15 @@ const siteSep = " ← "
 
 // Meta is the recording context shown in the HTML header.
 type Meta struct {
-	Dir          string
-	PID          int
-	GoVersion    string
-	Kernel       string
-	QuietBytes   string
-	QuietObjects string
-	QuietRegions []QuietRegionView
-	HasCore      bool
+	Dir           string
+	PID           int
+	GoVersion     string
+	Kernel        string
+	QuietBytes    string
+	QuietExcluded string
+	QuietObjects  string
+	QuietRegions  []QuietRegionView
+	HasCore       bool
 }
 
 // QuietRegionView lists monitored areas without observed access.
@@ -174,7 +175,9 @@ table.hm td,table.hm th{padding:8px 10px;white-space:nowrap;text-align:right;bor
 table.hm thead th{position:sticky;top:0;background:var(--accent-soft);color:var(--ink);font-weight:650;z-index:1}
 table.hm tbody tr:last-child td{border-bottom:0}
 table.hm tbody tr:hover td:not(.c){background:var(--accent-soft)}
-table.hm td.n{max-width:26em;overflow:hidden;text-overflow:ellipsis;text-align:left}
+table.hm td.n{max-width:26em;text-align:left}
+table.hm td.n bdi{display:block;max-width:26em;overflow-x:auto;scrollbar-width:thin}
+table.hm td.n bdi:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 table.hm td.c{width:9px;min-width:9px;height:16px;padding:0;border:0}
 table.hm td.g{border-left:2px solid var(--gap)}
 table.hm th.t{padding:0;text-align:left;font-weight:normal;color:var(--muted);overflow:visible;max-width:9px}
@@ -192,8 +195,8 @@ tr[hidden]{display:none}
 <header class="report-header"><div class="eyebrow">Memory access / Go process</div><h1>Access heatmap</h1>
 <p class="meta"><span>Recording <code>{{.Dir}}</code></span><span>PID {{.PID}}</span><span>{{.GoVersion}}</span><span>Kernel {{.Kernel}}</span><span>Window {{.Span}} · {{len .H.Columns}} columns</span></p></header>
 {{if .QuietBytes}}<section class="card" aria-label="Quiet candidates"><h2>Quiet candidates</h2><p class="summary-value">{{.QuietBytes}}</p>
-<p class="note">Monitored, resident memory with no access observed during this window. Candidates for inspection, not proof these allocations are unused.</p>
-{{if .QuietObjects}}<p><strong>Quiet objects:</strong> {{.QuietObjects}} fully inside quiet regions at core time. Other quiet bytes may be parts of active objects or have no known allocation site.</p>{{end}}
+<p class="note">Core-time reachable Go object bytes in monitored resident regions with no access observed. Candidates for inspection, not proof these allocations are unused.{{if .QuietExcluded}} {{.QuietExcluded}} excluded: no reachable Go object in final core; may have been freed or untracked.{{end}}</p>
+{{if .QuietObjects}}<p><strong>Quiet objects:</strong> {{.QuietObjects}} fully inside quiet regions at core time. Count above can also include parts of objects active elsewhere.</p>{{end}}
 </section>{{end}}
 <section class="card" aria-label="Reading the heatmap"><p class="note">Cell color shows DAMON access rate: share of sampling checks that saw access, weighted by monitored bytes. Dashed outlines mean partial coverage. Red borders mark time gaps. Hover for values.</p>
 {{range .H.Notes}}<p class="note">Note: {{.}}</p>{{end}}
@@ -201,7 +204,7 @@ tr[hidden]{display:none}
 {{define "table"}}<div class="table-scroll" role="region" aria-label="Heatmap table" tabindex="0"><table class="hm sortable">
 <thead><tr><th>type</th>{{if .Site}}<th>allocation site</th>{{end}}<th>size</th><th>label</th><th>mean</th><th>max</th><th>monitored</th>{{range $i, $t := $.Ticks}}<th class="t{{if $t}} tick{{end}}{{if index $.Gaps $i}} g{{end}}">{{if $t}}<span>{{$t}}</span>{{end}}</th>{{end}}</tr></thead>
 <tbody>{{range .Rows}}<tr data-type="{{.Name}}" data-site="{{.Site}}" data-start="{{.Start}}" data-mean="{{.Mean}}" data-max="{{.Max}}" data-bytes="{{.Bytes}}">
-<td class="n" title="{{.Name}}"><bdi>{{.Name}}</bdi></td>{{if $.Site}}<td class="n" title="{{.Site}}"><bdi>{{.Site}}</bdi></td>{{end}}<td>{{.Size}}</td><td>{{.Label}}</td><td>{{printf "%.4f" .Mean}}</td><td>{{printf "%.4f" .Max}}</td><td>{{printf "%.0f%%" .Covered}}</td>
+<td class="n" title="{{.Name}}"><bdi tabindex="0">{{.Name}}</bdi></td>{{if $.Site}}<td class="n" title="{{.Site}}"><bdi tabindex="0">{{.Site}}</bdi></td>{{end}}<td>{{.Size}}</td><td>{{.Label}}</td><td>{{printf "%.4f" .Mean}}</td><td>{{printf "%.4f" .Max}}</td><td>{{printf "%.0f%%" .Covered}}</td>
 {{range $i, $c := .Cells}}<td class="c {{$c.Class}}{{if index $.Gaps $i}} g{{end}}" title="{{$c.Title}}"></td>{{end}}</tr>
 {{end}}</tbody></table></div>{{end}}
 {{if .Sites.Rows}}<section class="card"><h2>By type and allocation site</h2>
@@ -211,9 +214,9 @@ tr[hidden]{display:none}
 <label for="filter-site">Allocation site<input id="filter-site" type="search" placeholder="Filter site"></label></div>
 {{template "table" .Sites}}</section>{{end}}
 {{if .QuietRegions}}<section class="card" aria-label="Quiet regions"><h2>Quiet regions ({{len .QuietRegions}})</h2>
-<p class="note">Sorted by region size. Type and allocation site identify reachable core-time objects overlapping each region; overlap bytes count only bytes inside region. Objects may be active elsewhere. Sites exist only for heap-profile-sampled objects.</p>
+<p class="note">Only regions with reachable Go objects at core time; sorted by region size. Quiet total counts overlap bytes, not whole region sizes. Objects may be active elsewhere. Sites exist only for heap-profile-sampled objects.</p>
 <div class="table-scroll" role="region" aria-label="Quiet regions table" tabindex="0"><table class="hm"><thead><tr><th>address range</th><th>region size</th>{{if .HasCore}}<th>Core object overlap</th><th>type</th><th>allocation site</th><th>overlap bytes</th>{{end}}</tr></thead><tbody>
-{{range .QuietRegions}}{{ $region := . }}{{if .Sites}}{{range .Sites}}<tr><td class="n">{{$region.Address}}</td><td>{{$region.Size}}</td>{{if $.HasCore}}<td>{{$region.CoreObjects}}</td><td class="n" title="{{.Type}}"><bdi>{{.Type}}</bdi></td><td class="n" title="{{.Site}}"><bdi>{{.Site}}</bdi></td><td>{{.Bytes}}</td>{{end}}</tr>{{end}}{{else}}<tr><td class="n">{{.Address}}</td><td>{{.Size}}</td>{{if $.HasCore}}<td>{{.CoreObjects}}</td><td>—</td><td>—</td><td>—</td>{{end}}</tr>{{end}}{{end}}
+{{range .QuietRegions}}{{ $region := . }}{{if .Sites}}{{range .Sites}}<tr><td class="n"><bdi tabindex="0">{{$region.Address}}</bdi></td><td>{{$region.Size}}</td>{{if $.HasCore}}<td>{{$region.CoreObjects}}</td><td class="n" title="{{.Type}}"><bdi tabindex="0">{{.Type}}</bdi></td><td class="n" title="{{.Site}}"><bdi tabindex="0">{{.Site}}</bdi></td><td>{{.Bytes}}</td>{{end}}</tr>{{end}}{{else}}<tr><td class="n"><bdi tabindex="0">{{.Address}}</bdi></td><td>{{.Size}}</td>{{if $.HasCore}}<td>{{.CoreObjects}}</td><td>—</td><td>—</td><td>—</td>{{end}}</tr>{{end}}{{end}}
 </tbody></table></div></section>{{end}}
 <script>
 const typeFilter = document.getElementById('filter-type');
